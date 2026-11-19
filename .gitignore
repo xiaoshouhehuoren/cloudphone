@@ -1,0 +1,14 @@
+*.so
+*.apk
+*.o
+*.png
+*.jpg
+*.jpeg
+*.yuv
+*.log
+tmpb/
+aosp/
+linklibs/
+dl_libs/
+*.tar
+*.zip
