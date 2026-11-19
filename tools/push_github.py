@@ -29,10 +29,20 @@ def api(path, method='GET', token=None, body=None):
         return e.code, json.loads(e.read().decode() or '{}')
 
 
+def verify(token):
+    st, d = api('/user', token=token)
+    print('auth:', st, d.get('login'), d.get('name'))
+    st2, d2 = api('/user/memberships/orgs/%s' % ORG, token=token)
+    print('org membership:', st2, (d2.get('role') if isinstance(d2, dict) else d2))
+    return st == 200 and st2 == 200
+
+
 def main():
     token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if not token:
         sys.exit('missing GH_TOKEN (GitHub personal access token with repo scope)')
+    if '--verify' in sys.argv:
+        sys.exit(0 if verify(token) else 3)
     st, d = api('/repos/%s/%s' % (ORG, REPO), token=token)
     if st == 404:
         st, d = api('/orgs/%s/repos' % ORG, 'POST', token,
