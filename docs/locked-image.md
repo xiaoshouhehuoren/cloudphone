@@ -468,6 +468,63 @@ binder 是 Android userspace 的地基。板载内核在 guest 里能挂 binderf
 chroot / exec `/system/bin/init`，让它以真 SELinux 起来 —— 这是下一步的硬活，
 也是整个 VM 路线能不能落地的分水岭。
 
+### 4.10 Android rootfs 在 VM 里能起多深（2026-11-20 实测）
+
+路线 A 的下一个问题是"把 redroid 的 Android rootfs 塞进 VM 能不能真的开机"。结论：
+**内核、binder、SELinux 这层成立，卡在显示栈（GPU/HWC）**。
+
+做法：`docker export` 出 rootfs（rt1 镜像 1,721,274,880 B / stock rt:13 镜像
+1,737,178,624 B，system-as-root 布局，`/init` 是软链指向 `/system/bin/init`），
+在板上 `mkfs.ext4` 一个 8G 的 `android.img`，把 tar 解进去，然后用板载内核启动：
+
+```
+qemu-system-aarch64 -machine virt,gic-version=3 -accel kvm -cpu host -smp 4 -m 2048 \
+  -kernel /boot/vmlinuz-6.18.48-ophub -initrd /boot/initrd.img-6.18.48-ophub \
+  -append "console=ttyAMA0 root=/dev/vda rw rootwait net.ifnames=0 androidboot.hardware=redroid androidboot.selinux=permissive qemu=1" \
+  -drive file=android.img,if=none,id=hd0,format=raw -device virtio-blk-pci,drive=hd0 \
+  -device virtio-net-pci,netdev=n0 -netdev user,id=n0,hostfwd=tcp::5555-:5555 -nographic
+```
+
+（`net.ifnames=0` 必须加，否则 initrd 的 udev 把 eth0 改名成 enp0s2；
+stdin 用 `mkfifo vm2.in` + `tail -f cmds2.txt > vm2.in` 驱动，否则 QEMU 会阻塞在 FIFO open。）
+
+实测到达：
+
+- init 正常走完 early-init / post-fs-data / boot，apexd 把 `/apex/com.android.adbd` 等挂上；
+- **zygote 起来了（zygote64 + zygote32 双实例）**，system_server 也被 fork 出来且跑过一段；
+- 但 `sys.boot_completed` 始终为空，随后 zygote/system_server 进入 5 秒一轮的重启循环。
+
+三个具体的坑（都定位到行）：
+
+1. **boot 镜像对不上**：rt1 的 `/system/framework/framework.jar` 被 RT 打过补丁
+   （classes5.dex，5 个 dex），而 `boot-framework.vdex` 是软链
+   `arm/boot-framework.vdex -> ../boot-framework.vdex`，目标文件在 rt1 镜像里缺失。
+   ART 启动时报
+   `expected 4 uncompressed dex files, but found 5 in '/system/framework/framework.jar'`，
+   于是每轮都重开 dex2oat 重编 boot image，zygote 活不下来。
+   （从 stock 镜像 `docker cp` 出 `boot-framework.vdex` 补上后，报错变成"dex 数不符"，仍需重编。）
+   用 stock rt:13 的 rootfs 时 vdex 齐全，zygote 与 system_server 都能起来。
+2. **task profiles 失败会连服务一起杀**：VM 里的 cgroup v2（`cgroup.controllers` 有
+   cpuset/cpu/io/memory/pids）没有 Android 期望的子系统结构，init 反复报
+   `init: failed to set task profiles`；zygote 服务带
+   `task_profiles ProcessCapacityHigh MaxPerformance`，设置失败后整服务被 init 杀掉
+   （日志里跟一条 `init: Sending signal 9 to service 'zygote' ... process group`）。
+   把 `init.zygote64_32.rc` 里的 `task_profiles` 行删掉后 zygote 稳定存活。
+3. **显示栈是硬缺口**：`vendor.hwcomposer-2-1`、`vendor.gralloc-2-0` 在 QEMU virt 里
+   `exited with status 1`（G98 的 gralloc/HWC 依赖 panthor/DRM，VM 没有这块 GPU），
+   于是 surfaceflinger 反复 `Fatal signal 6 (SIGABRT)`，servicemanager 报
+   `Could not find 'aidl/SurfaceFlinger' for ctl.interface_start`，
+   没有 SurfaceFlinger 就没有 UI，`sys.boot_completed` 也就不会置位。
+
+所以 VM 路线**不是内核问题，是显示问题**：要让 Android 在 VM 里真正可用，得给
+virtio-gpu 配一个软件 HWC（AOSP 的 `hwcomposer.drm`/minigbm，或 emulator 的 ranchu
+HWC），这是新的构建任务，不是配置能解决的。当前状态下 VM 里的 Android 只能到
+"init + zygote + system_server 进程存在"，没有可用的界面。
+
+板子上的实验资产（2026-11-20）：`/root/vm/rt1.tar`(1.72GB)、`/root/vm/android.img`
+(8G，rt1 rootfs)、`/root/vm/stock.tar`(1.74GB)、`/root/vm/android2.img`(8G，stock rootfs)、
+`/root/vm/boot10..12.log`。
+
 ## 5. 这对“对标百度云手机”和身份 App 意味着什么
 
 百度 R3588 云手机是平台侧定制的系统镜像 + 用户侧锁定，不是在公版 Armbian 上跑
