@@ -93,8 +93,7 @@
 - 板子经 Windows 反向代理（`tmp_g98_proxy_tunnel.py`，本机 8899 → 板子 127.0.0.1:8899）恢复公网，
   `apt-get install qemu-system-arm` 成功，`/usr/bin/qemu-system-aarch64` 就位（1:10.0.13+ds-0+deb13u1，RC=0）。
 - 资源：8 核 / 15.9GB（可用约 9.9GB）/ 剩 402G；guest 系统可用 `/root/gsi13/system.img` + `vbmeta.img`。
-- **缺口**：GSI 没有可引导的内核；板上 `/root/g98-kernel-6.1.115/Image` 是带板级驱动的内核，
-  在 QEMU `virt` 上大概率起不来，需要一个通用 arm64 内核（需 mainline 源码）。
+- **缺口已补上**：见下面「已完成 10」——板载内核能在 QEMU `virt` 上跑，而且带 binder。
 
 ## 阻塞：WSL 构建机（2026-11-20）
 
@@ -105,3 +104,25 @@
   另有 47MB 快速备选（`wsl_update_x64.msi` 17MB + `ubuntu-base-24.04` rootfs 30MB）已下齐在 `.tmp_wsl/`。
 - 注意：**即使 WSL 装好，AOSP 全量 `repo sync` 在本机 0.13–0.5MB/s 的出口带宽下也不现实**（>80 小时）。
 
+
+## 已完成 10：板子上 VM 路线打通（KVM + 板载内核 + binder，2026-11-20）
+
+- **qemu 全套就位**：`qemu-system-arm`（1:10.0.13+ds-0+deb13u1）、`qemu-efi-aarch64`（AAVMF）、
+  `ipxe-qemu`（提供 `efi-virtio.rom`）。`apt-get download linux-image-arm64` 只拿到 1444 B 元包，
+  真包名是 `linux-image-6.12.117+deb13-cloud-arm64-unsigned`（28,394,444 B，7MB/s）。
+- **Debian 12 arm64 guest 起得来**：`debian-12-genericcloud-arm64.qcow2`（345,047,040 B）+ AAVMF UEFI，
+  0.68s `Freeing unused kernel memory`，1.42s `systemd[1]`。
+- **决定性结果：板载内核当 guest 内核可用，而且 binder 能挂**。
+  `-kernel /boot/vmlinuz-6.18.48-ophub -initrd /boot/initrd.img-6.18.48-ophub`，
+  guest 里 `uname -r` = 6.18.48-ophub，`mount -t binder none /dev/binderfs` 成功，
+  出现 `binder / binder-control / features / hwbinder / vndbinder`。
+- **两个坑**：`-drive if=virtio` 需要 `efi-virtio.rom`（装 ipxe-qemu）；
+  别用 `-kernel` 直接启 Debian cloud 内核（virtio-blk 是模块，必 `VFS: Unable to mount root fs`）。
+  binderfs 的 fs 类型名是 `binder` 不是 `binderfs`。
+- **内核差异（关键）**：板载 6.18.48-ophub 有 `CONFIG_ANDROID_BINDER_IPC=y` / `BINDERFS=y` /
+  `BINDER_DEVICES="binder,hwbinder,vndbinder"`；Debian 官方 6.12 cloud 内核是
+  `# CONFIG_ANDROID_BINDER_IPC is not set` —— **Debian 内核跑不了 Android，板载内核可以**。
+- **推论**：每实例独立内核 → 独立 selinuxfs → 独立 policy，4.8 的架构约束被绕开。VM 路线成立。
+- **下一步硬活**：把 `g98/redroid-panthor-rt-rt1:13` 的 rootfs 导出成 ext4 磁盘，在 VM 里
+  exec `/system/bin/init`，让 Android 以真 SELinux 起来。这是 VM 路线能不能落地的分水岭。
+- 详见 `docs/locked-image.md` 4.9。

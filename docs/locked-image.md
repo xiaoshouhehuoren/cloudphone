@@ -396,6 +396,78 @@ selinuxfs 没有 namespace：**一个内核只有一份 policy**。G98 上 Armbi
 能做的只有"整个板子共享一份 permissive 折中 policy"，那对身份类 App 没有意义。
 要让 SELinux 成为真实的安全边界、且每实例独立，只有 VM 一条路。
 
+### 4.9 实测：板子上 VM 路线打通（KVM + 板载内核 + binder）
+
+2026-11-20 在 G98 上把“每实例独立内核”这条路走通了。
+
+**一、KVM 是真的能用**
+自写 C 探针（纯 ioctl）跑出 `KVM_GET_API_VERSION=12`、`KVM_GET_VCPU_MMAP_SIZE=8192`、
+`KVM_CREATE_VM=4`、`KVM_CREATE_VCPU=5` 全部成功；`/dev/kvm`（10,232）、`/dev/vhost-net` 存在，
+`/proc/interrupts` 有 vgic / kvm guest ptimer / kvm guest vtimer。
+
+**二、qemu 与固件已就位**
+- `apt-get install qemu-system-arm qemu-utils` → RC=0，`qemu-system-aarch64 1:10.0.13+ds-0+deb13u1`
+- `qemu-efi-aarch64`：AAVMF 固件 `/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd` + `AAVMF_VARS.fd`
+- `ipxe-qemu`：提供 `efi-virtio.rom`，缺了会报 `failed to find romfile "efi-virtio.rom"`
+
+**三、两个必须知道的 QEMU 坑**
+1. `-drive if=virtio` 会去找 virtio 的 option ROM，Debian 上默认不带；
+   装 `ipxe-qemu` 解决，或用 `-device virtio-blk-pci,drive=hd0,romfile=` 显式关掉。
+2. **不要用 `-kernel` 直接塞 Debian cloud 内核**：它的 virtio-blk 是模块
+   （`CONFIG_VIRTIO_BLK=m`），没有 initrd 就
+   `Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)`。
+   要么走 UEFI（两个 pflash）让镜像自己的 grub/initrd 干活，要么用板载内核 + 板载 initrd。
+
+**四、Debian 12 arm64 guest 起得来**
+`debian-12-genericcloud-arm64.qcow2`（345,047,040 B）+ AAVMF → UEFI → kernel → systemd：
+客机日志里 `Freeing unused kernel memory` 在 0.68s，`systemd[1]` 在 1.42s 起来。
+
+**五、决定性的一步：板载内核在 guest 里跑，而且 binder 可用**
+
+~~~
+qemu-system-aarch64 -machine virt,gic-version=3 -accel kvm -cpu host \
+  -smp 4 -m 3072 \
+  -kernel /boot/vmlinuz-6.18.48-ophub -initrd /boot/initrd.img-6.18.48-ophub \
+  -append "console=ttyAMA0 root=/dev/vda1 rw cloud-init=disabled" \
+  -drive file=deb12.qcow2,if=none,id=hd0,format=qcow2 -device virtio-blk-pci,drive=hd0 \
+  -device virtio-net-pci,netdev=n0 -netdev user,id=n0,hostfwd=tcp::2222-:22 \
+  -nographic
+~~~
+
+guest 里实测：
+
+~~~
+# uname -r
+6.18.48-ophub
+# grep binder /proc/filesystems
+nodev   binder
+# mkdir -p /dev/binderfs && mount -t binder none /dev/binderfs && echo OK
+OK
+# ls /dev/binderfs
+binder binder-control features hwbinder vndbinder
+~~~
+
+注意 binderfs 的文件系统类型名是 `binder` 而不是 `binderfs`：
+`mount -t binderfs ...` 会报 `unknown filesystem type 'binderfs'`，那是名字写错了，不是没编。
+
+配置佐证：`/boot/config-6.18.48-ophub` 有 `CONFIG_ANDROID_BINDER_IPC=y`、
+`CONFIG_ANDROID_BINDERFS=y`、`CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"`；
+而 Debian 官方 `linux-image-6.12.117+deb13-cloud-arm64` 是
+`# CONFIG_ANDROID_BINDER_IPC is not set` —— **Debian 内核跑不了 Android，板载内核可以**。
+
+**六、这意味着什么**
+binder 是 Android userspace 的地基。板载内核在 guest 里能挂 binderfs，说明
+“把 redroid 的 Android rootfs 搬进这台 VM、由它自己的内核承载”在技术上可行。
+真做成之后，每个实例有自己的内核 → 有自己的 selinuxfs → 有自己的 policy，
+4.8 的“一内核一份 policy”约束就被绕开了。
+
+代价前面已算过：一台 3GB / 4vCPU，6 台放不进 16GB。
+
+**七、还没做的**
+把 `g98/redroid-panthor-rt-rt1:13` 的 rootfs 导出成 ext4 磁盘，在 VM 里
+chroot / exec `/system/bin/init`，让它以真 SELinux 起来 —— 这是下一步的硬活，
+也是整个 VM 路线能不能落地的分水岭。
+
 ## 5. 这对“对标百度云手机”和身份 App 意味着什么
 
 百度 R3588 云手机是平台侧定制的系统镜像 + 用户侧锁定，不是在公版 Armbian 上跑
@@ -424,12 +496,13 @@ VM 有自己的内核，selinuxfs 和 policy 都是实例私有的，不碰宿�
 - 资源：8 核、15.9GB 内存（可用约 9.9GB）、`/` 剩 402G；
 - 已有 AOSP13 GSI 镜像可当 guest 系统：`/root/gsi13/system.img`（1.9GB）+ `vbmeta.img`。
 
-**尚未解决的是 guest 内核**：GSI 只有 system 镜像，没有可引导的内核；
-板上现成的 `/root/g98-kernel-6.1.115/Image` 是带 RK3588 板级驱动的内核，
-在 QEMU `virt` 机器上大概率起不来，需要编一个通用 arm64 内核（板上 gcc 14 可编，
-但要有 mainline 源码）。这是路线 A 下一步唯一的硬活。
+**guest 内核问题已经解决（2026-11-20 实测，见 4.9）**：板子自己的
+`/boot/vmlinuz-6.18.48-ophub` + `/boot/initrd.img-6.18.48-ophub` 可以直接在
+QEMU `virt` 上启动，而且它**自带 binder / binderfs**（红旭容器需要，而 Debian
+官方内核反而不带）。这意味着“Android rootfs 跑在独立内核的 VM 里”在板子上是可行的。
 
-代价不变：每实例内存/CPU 开销远高于容器；16GB 跑不了 6 台。
+代价不变：每实例内存/CPU 开销远高于容器；实测一台 3GB / 4vCPU 的 guest，
+宿主 `Mem: 15957 总 / 9800 可用`，6 台 × 3GB 超出 16GB，实际只能 4 台 × 3GB 或 6 台 × 2GB 配 swap。
 
 适合"要验证 SELinux 行为"或"少量高安全实例"，不适合 6 台云手机。
 
