@@ -41,10 +41,16 @@
 
 - 基于 rt1 做成 `g98/redroid-panthor-locked:0.1`（sha256 `7e1d5639...`）：关 adbd、删 su、`ro.build.type=user` / `release-keys` / `ro.debuggable=0`。
 - locktest2 验证：`sys.boot_completed=1`、`init.svc.adbd` 为空、无 adbd 进程、`/system/xbin/su` 不存在。
-- 仍未完成：SELinux enforcing（`getenforce=Disabled`）。原因与后续路线见 `docs/locked-image.md`。
+- 仍未完成：容器级 SELinux enforcing（locked 0.1 的 `getenforce=Disabled`）。原因与后续路线见 `docs/locked-image.md`。
 
-## 阻塞：SELinux enforcing（2026-11-20）
+## 已完成 7：SELinux policy 层验证（2026-11-20）
+
+- 测试板上把 Android 13 `precompiled_sepolicy` 真正写入 `/sys/fs/selinux/load`：加载成功，宿主进程 label 从 `kernel` 变 `u:r:kernel:s0`。
+- 用容器内 `secilc` 重编 policy，加 `(typepermissive kernel)`，`enforce=1` 后 SSH 与 m1–m6 均存活，`permissive=0` 计数为 0。
+- 结论：策略层可行；但容器服务仍全在 `kernel` permissive 域，`getenforce` 仍 Disabled，因为 redroid 的 libselinux/init hook 没撤。产物在 `/srv/redroid/selinux/`，实验后已 reboot 清理。
+
+## 阻塞：容器级 SELinux enforcing（2026-11-20）
 
 - redroid 在源码里故意关闭 SELinux（维护者确认：`external/selinux`、`system/core`、`frameworks/native` 的 libselinux hook）；容器参数、bind `/proc/cmdline`、改 init 都不能打开。
-- SELinux policy 是内核全局的，G98 宿主 Armbian 没有 Android policy；容器里强行加载会影响 m1–m6 和宿主。
-- 要真 enforcing 只能上 VM/独立内核，或自己编 Android + 撤补丁 + 定制 sepolicy；当前 redroid 架构下不做。
+- 策略层已经验证可加载/可重编，但要让 Android 服务进入各自 domain，必须重编 libselinux/init；当前镜像做不到。
+- 宿主 Armbian 与容器共享内核 policy；测试可用 `kernel` permissive 保住宿主，但这不是生产隔离方案。生产要么 VM/独立内核，要么改 Android 宿主并定制 host policy。

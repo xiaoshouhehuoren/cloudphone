@@ -1,6 +1,6 @@
 # G98 locked image（0.1）：已完成的部分与 SELinux 边界
 
-> 结论先行：**“无 root、无 adb、user/release-keys”已经在 g98/redroid-panthor-locked:0.1 上验证通过；但真正的 SELinux enforcing 在 redroid 容器里没有做成，也不是改几个属性/init 文件能解决的。** 本文记录已做的改动、验证结果、SELinux 失败原因，以及要继续走的两条路。
+> 结论先行：**“无 root、无 adb、user/release-keys”已经在 g98/redroid-panthor-locked:0.1 上验证通过；SELinux 在测试板上已经做到“加载 Android policy + 全局 enforce=1，宿主用 permissive kernel 域存活”；但 redroid 容器里的服务仍然全部落在 kernel 域，只能算策略层验证，不是容器级 enforcing。真正要让容器服务进入各自 domain，必须撤掉 redroid 的 libselinux/init 补丁并重编。** 本文记录已做的改动、验证结果、SELinux 失败原因，以及要继续走的两条路。
 
 ## 1. 目标与基线
 
@@ -149,13 +149,51 @@ libselinux hook + system/core 补丁把 SELinux 整体短路了。
 如果在容器里强行加载 Android policy，这份 policy 会变成宿主全局 policy，
 m1–m6 以及宿主进程都可能被错误 label/拒绝。这不是“容器级开关”，不能在生产板上试。
 
-### 4.4 结论
+### 4.4 测试板实验：policy 能加载，enforce 能打开（2026-11-20）
 
-在 **redroid + 共享 Armbian 内核 + 6 个容器**这个架构下，
-真正的 SELinux enforcing 不可达。能做的只是：
+在 G98 测试板上做了受控实验。结论分三层：
+
+1. **Android 13 policy 能被 6.18 内核加载。**
+   从 `g98/redroid-panthor-rt-rt1:13` 取出
+   `/vendor/etc/selinux/precompiled_sepolicy`（616,315 B），
+   静态 loader 写 `/sys/fs/selinux/load`，返回 `loaded 616315 bytes`，RC=0。
+   加载前 `/proc/self/attr/current=kernel`，加载后变成 `u:r:kernel:s0`；
+   dmesg 出现 `SELinux: ...`、unknown class（mctp_socket、io_uring、
+   user_namespace、watch_mountns 等）和 `avc: denied ... permissive=1`。
+   说明内核接受这份 policy，只是宿主进程没有 domain transition，全部落在
+   `kernel` 域。
+
+2. **用 secilc 可以重编 policy，把 `kernel` 域设为 permissive。**
+   容器内 `/system/bin/secilc` 可用（policy version 33），命令：
+   `secilc -m -M true -G -c 33 -o policy.bin plat_sepolicy.cil 33.0.cil plat_pub_versioned.cil vendor_sepolicy.cil extra.cil`
+   其中 `extra.cil` 只有一行 `(typepermissive kernel)`。
+   生成的 policy 为 617,235 B，加载成功；`echo 1 > /sys/fs/selinux/enforce`
+   后 `enforce=1`，SSH、m1–m6 都存活，dmesg 中 `permissive=0` 计数为 0。
+
+3. **但这不是容器级 enforcing。**
+   容器内 raw `/sys/fs/selinux/enforce=1`，而进程仍然
+   `/proc/self/attr/current=u:r:kernel:s0`；`getenforce` 仍是 `Disabled`
+   （redroid 的 libselinux `is_selinux_enabled/security_getenforce` hook）。
+   所有 Android 服务都在 permissive 的 `kernel` 域，等于“全局开关打开了，
+   但没有 domain 可执行”。要变成真 enforcing，仍需撤掉
+   `external/selinux` / `system/core` 的 hook 并重编镜像。
+
+实验后已 `echo 0` 并 reboot，宿主恢复 `enforce=0`、`/proc/self/attr/current=kernel`，
+m1–m6 由 `unless-stopped` 自动拉起。产物保留在
+`/srv/redroid/selinux/`（`policy-kernel-permissive.bin`、`selinux_load`、
+`selinux_load.c`、`extra-kernel-permissive.cil`）。这验证了“策略层可行”，
+但没有改变“当前 redroid 镜像无法做容器级 enforcing”的结论。
+
+### 4.5 结论
+
+在 **redroid + 共享 Armbian 内核 + 6 个容器 + 当前 rt1/locked 镜像**这个组合下，
+真正的“每个容器进入自己的 SELinux domain 并 enforcing”不可达；但“加载 policy、
+打开全局 enforce、用 permissive kernel 域保住宿主”已经在测试板上验证可行。能做的：
 
 - 无 root、无 adb、user/release-keys（已完成）；
-- 不能把 getenforce 变成 Enforcing，也不能假装。
+- 策略层：加载 Android policy、`enforce=1`、`kernel` permissive（测试板已验证）；
+- 容器服务级：仍需重编 libselinux/init，当前镜像做不到；
+- 不能把 `getenforce` 改成 Enforcing 来假装，容器里它仍会显示 Disabled。
 
 ## 5. 这对“对标百度云手机”和身份 App 意味着什么
 
@@ -192,7 +230,9 @@ redroid 再改几个属性。它的“免 root 支持 RT”说明 RT 可以进 s
 3. 宿主也启用 SELinux 并加载与 Android 兼容的 policy，或改用 Android 宿主；
 4. 回归 m1–m6、RT、相机 HAL、gralloc。
 
-这不是 1–2 天的事，且会改变整块板子的安全模型；在没有独立测试板之前不建议动。
+其中第 2 步的 policy 层已经在测试板上验证：`secilc` 可重编，`(typepermissive kernel)`
+可让 Armbian 宿主在 `enforce=1` 下存活；真正剩下的是第 1 步（libselinux/init 重编）
+和第 3 步的 host policy 取舍。没有独立测试板之前，不建议把这套东西放到生产容器上。
 
 ## 7. 当前资产与清理
 
@@ -202,6 +242,8 @@ redroid 再改几个属性。它的“免 root 支持 RT”说明 RT 可以进 s
 - 测试容器：locktest2、locktest3、locktest6、locktest8 等
 - 诊断文件：/srv/redroid/init.orig、init.patched1、init.patched2、
   init-wrapper.c、init-wrapper、fake_cmdline
+- SELinux 策略实验：/srv/redroid/selinux/policy-kernel-permissive.bin、
+  selinux_load、selinux_load.c、extra-kernel-permissive.cil
 
 清理测试容器：
 
@@ -215,6 +257,7 @@ docker rm -f locktest locktest2 locktest3 locktest4 locktest5 locktest5b locktes
 
 先做阶段 1：在 rt1 镜像上关 adbd、删 su、改 user/release-keys，commit 成
 locked:0.1，用独立容器验证“无 root/无 adb/能开机”。这一步已经完成。
-阶段 2 的 SELinux enforcing 不要在这个 redroid 架构上继续投入——它不是配置问题，
-是 redroid 的源码设计 + 共享内核 policy 的架构限制；要真 SELinux 就上 VM/独立内核，
-或者接受“hardened container”而不是“locked phone”。
+阶段 2 在测试板上可以继续做“策略层”：加载 Android policy、`enforce=1`、
+`kernel` permissive 已经验证；但要让容器服务真正进入自己的 domain，必须重编
+redroid 的 libselinux/init，或改走 VM/独立内核。当前 locked 0.1 仍应称为
+“hardened container”，不是“locked phone”。
