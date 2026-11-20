@@ -95,14 +95,21 @@
 - 资源：8 核 / 15.9GB（可用约 9.9GB）/ 剩 402G；guest 系统可用 `/root/gsi13/system.img` + `vbmeta.img`。
 - **缺口已补上**：见下面「已完成 10」——板载内核能在 QEMU `virt` 上跑，而且带 binder。
 
-## 阻塞：WSL 构建机（2026-11-20）
+## WSL 构建机：已可用（2026-11-20 晚）
 
-- `Microsoft-Windows-Subsystem-Linux` 与 `VirtualMachinePlatform` 已启用（提权 dism 完成），
-  但 `Component Based Servicing\RebootPending` 仍在 —— **必须重启 Windows 才能生效**，尚未重启。
-- 本机 in-box `wsl.exe` 是存根，缺 kernel；需装 WSL MSIX 包。712MB 的
-  `Microsoft.WSL_3.0.5.0_x64_ARM64.msixbundle` 正在后台下载（0.3–1.7MB/s）；
-  另有 47MB 快速备选（`wsl_update_x64.msi` 17MB + `ubuntu-base-24.04` rootfs 30MB）已下齐在 `.tmp_wsl/`。
-- 注意：**即使 WSL 装好，AOSP 全量 `repo sync` 在本机 0.13–0.5MB/s 的出口带宽下也不现实**（>80 小时）。
+- 用户手动装好 WSL（MSIX 包必须管理员权限，脚本提权三次被 UAC 取消，最后是用户点的）。
+  实测 `wsl --version`：WSL 6.18.58.1-1、WSLg 1.0.79、MSRDC 1.2.7391、Direct3D 1.611.1。
+- Ubuntu 用 import 方式落地（不碰商店、不下载大包）：
+  `wsl --import Ubuntu C:/Users/rosetta/Desktop/g98/.wsl/Ubuntu <rootfs.tar.gz> --version 2`。
+  **坑**：PowerShell 单引号字符串里写反斜杠会变成双反斜杠，导致 `Wsl/ERROR_PATH_NOT_FOUND`，用正斜杠。
+- rootfs 没有 ca-certificates，https 源握手失败；源改成 http://mirrors.tuna.tsinghua.edu.cn 后
+  `apt` 跑到 **5.4MB/s**（Windows 宿主出口只有 0.13–0.5MB/s，WSL 走的是另一条路径）。
+- `repo init -u https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/platform/manifest.git -b android-13.0.0_r74 --depth=1`
+  成功；已 sync 到 `system/core`、`external/selinux`、`external/libdrm`、`external/minigbm`、`external/drm_hwcomposer`，
+  全量 sync 在后台跑（`/opt/aosp`）。
+- **`platform/*` 前缀只是 repo 里的路径**：实际 checkout 是 `/opt/aosp/system/core`、`/opt/aosp/external/selinux`。
+- 关键待办：编干净的 `init`（撤掉 redroid 的 `selinux_setup`→`second_stage` 与 `se_hack` 两处补丁），
+  这是统一 SELinux 方案打通“进程打标签”的唯一缺口。
 
 
 ## 已完成 10：板子上 VM 路线打通（KVM + 板载内核 + binder，2026-11-20）
@@ -126,3 +133,19 @@
 - **下一步硬活**：把 `g98/redroid-panthor-rt-rt1:13` 的 rootfs 导出成 ext4 磁盘，在 VM 里
   exec `/system/bin/init`，让 Android 以真 SELinux 起来。这是 VM 路线能不能落地的分水岭。
 - 详见 `docs/locked-image.md` 4.9。
+
+## 已完成 11：locked 0.2 / 0.3 交付（2026-11-20）
+
+- **0.2**：以运行中的 m6 为基线 `docker commit`（0.2-base = b887d2a8bcc2），再删 su、
+  注释 `service adbd` 与所有 `start adbd`、build.prop 改 user/release-keys/debuggable=0，
+  commit 成 `g98/redroid-panthor-locked:0.2` = e9006c8b0f03（1.81GB）。
+  验证：55s `boot_completed=1`、无 adbd、无 su、RT agent 起来；相机 0 个设备。
+- **0.3**：修掉两个静默打掉相机的坑 —— ① 内核升级后 `/lib/modules/6.18.48-ophub` 缺
+  `v4l2loopback.ko`（从 `/root/v4l2loopback-main/` 拷进 `extra/` + `depmod -a`，
+  `vermagic: 6.18.48-ophub` 正好匹配）；② 容器自己的 /dev tmpfs 里 ueventd 把
+  `/dev/video10/11` 建成 `0600 root:root`，camera provider 以 cameraserver 跑 →
+  `deviceAdded open v4l2 device /dev/video10 failed:Permission denied`。在
+  `/system/etc/ueventd.rc` 固化 0666 规则后 commit 成 `g98/redroid-panthor-locked:0.3` = 4e12f9046ee5。
+  验证：55s 开机、无 root/adb、`/dev/video10/11` = 666、**camera devices = 2**、RT agent 运行。
+- **口径**：这是 hardened container，不是 locked phone；SELinux 仍 Disabled，无 TEE。
+- 详见 `docs/locked-image.md` 第 9 节。

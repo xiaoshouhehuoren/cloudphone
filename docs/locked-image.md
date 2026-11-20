@@ -641,3 +641,125 @@ locked:0.1，用独立容器验证“无 root/无 adb/能开机”。这一步�
 `kernel` permissive 已经验证；但要让容器服务真正进入自己的 domain，必须重编
 redroid 的 libselinux/init，或改走 VM/独立内核。当前 locked 0.1 仍应称为
 “hardened container”，不是“locked phone”。
+
+## 9. locked 0.2 / 0.3：交付版 hardened 容器（2026-11-20）
+
+0.1 建在 rt1 镜像上，只验证了“关 adbd、删 su、改属性”三步能不能成立。
+0.2 改为以运行中的 m6 为基线（`docker commit m6`），把 RT 运行态、相机 HAL、
+VINTF、product 应用一起固化；0.3 在 0.2 上补掉两个**会静默打掉相机**的环境坑。
+
+### 9.1 0.2 的构建
+
+~~~bash
+# 1) 以 m6 运行态为基线
+docker commit m6 g98/redroid-panthor-locked:0.2-base      # b887d2a8bcc2, 1.81GB
+
+# 2) 起构建容器（挂相机配置与独立 /data，40s 到 boot_completed=1）
+docker run -d --name l2build --privileged \
+  -v /srv/redroid/camcfg/cam0-external_camera_config.xml:/vendor/etc/external_camera_config.xml:ro \
+  -v /srv/redroid/l2data:/data g98/redroid-panthor-locked:0.2-base \
+  qemu=1 androidboot.hardware=redroid ro.hardware.gralloc=g98 ro.hw_timeout_multiplier=10
+
+# 3) 加固（与 0.1 同口径）
+docker exec l2build sh -c 'rm -f /system/xbin/su'
+docker exec l2build sh -c "sed -i 's/^[[:space:]]*start adbd/#&/' \
+  /system/etc/init/hw/init.usb.rc /system/etc/init/hw/init.usb.configfs.rc"
+docker exec l2build sh -c "sed -i '/^service adbd /,/^\$/ s/^/#/' /system/etc/init/hw/init.usb.rc"
+docker exec l2build sh -c "sed -i 's/^ro.build.type=.*/ro.build.type=user/; \
+  s/^ro.build.tags=.*/ro.build.tags=release-keys/; s/^ro.debuggable=.*/ro.debuggable=0/; \
+  s/^ro.adb.secure=.*/ro.adb.secure=1/; s/^ro.secure=.*/ro.secure=1/' /system/build.prop"
+
+# 4) 固化
+docker commit --change 'CMD ["qemu=1","androidboot.hardware=redroid","ro.hardware.gralloc=g98","ro.hw_timeout_multiplier=10"]' \
+  l2build g98/redroid-panthor-locked:0.2                    # e9006c8b0f03, 1.81GB
+~~~
+
+### 9.2 0.2 验证（l2test 独立容器，55 秒）
+
+| 检查项 | 结果 |
+| --- | --- |
+| `sys.boot_completed` | 1（55s） |
+| `ro.build.type` / `ro.build.tags` | user / release-keys |
+| `ro.debuggable` / `ro.secure` | 0 / 1 |
+| `init.svc.adbd` | 空 |
+| `ps -A` 里的 adbd | 无 |
+| `/system/xbin/su` | 不存在 |
+| `system_server` / `zygote` | 在跑（zygote64 + zygote32） |
+| RT：`libsalespartner_rt.so`、`framework.jar` | 在镜像里（2,222,024 B / 14,630,261 B） |
+| RT：`com.salespartner.workphone.agent` | 已启动（u0_a57） |
+| 相机 | **0 个设备**（见 9.3，属环境问题不是镜像问题） |
+
+### 9.3 0.3：两个会静默打掉相机的环境坑
+
+**坑 1：内核升级后 v4l2loopback 模块没跟上。**
+板子重启后 `/lib/modules/6.18.48-ophub` 里没有 `v4l2loopback.ko`，
+`camstream.service` 第一步 `modprobe v4l2loopback` 报
+`FATAL: Module v4l2loopback not found in directory /lib/modules/6.18.48-ophub`，
+于是 `/dev/video10/11` 根本不存在，相机枚举必然为 0。修复：
+
+~~~bash
+modinfo /root/v4l2loopback-main/v4l2loopback.ko | grep vermagic
+# vermagic: 6.18.48-ophub SMP preempt mod_unload aarch64   ← 与当前内核一致
+mkdir -p /lib/modules/$(uname -r)/extra
+cp /root/v4l2loopback-main/v4l2loopback.ko /lib/modules/$(uname -r)/extra/
+depmod -a
+systemctl restart camstream      # 脚本会 modprobe devices=6 video_nr=10..15
+ls /dev/video1*                  # video10..video15
+~~~
+
+**坑 2：节点有了，HAL 仍然 Permission denied。**
+现象（m6 的 logcat）：
+
+~~~
+E CamPrvdr@2.7-external: deviceAdded open v4l2 device /dev/video10 failed:Permission denied
+E CamPrvdr@2.7-external: deviceAdded open v4l2 device /dev/video11 failed:Permission denied
+~~~
+
+容器有**自己的 /dev tmpfs**（`tmpfs on /dev type tmpfs (rw,seclabel,nosuid,size=65536k,mode=755)`），
+宿主新出现的 v4l2loopback 节点经 uevent 在容器里由 Android 的 ueventd 重建，
+默认权限是 `crw------- root root`；而 camera provider 以 `cameraserver` 运行。
+修复（固化进镜像，不是手工 chmod）：在 `/system/etc/ueventd.rc` 追加
+
+~~~
+# G98 camera HAL loopback nodes
+/dev/video10              0666   root       video
+/dev/video11              0666   root       video
+~~~
+
+然后 `docker commit` 得到 **`g98/redroid-panthor-locked:0.3` = 4e12f9046ee5，1.81GB**。
+
+### 9.4 0.3 验证（l3test 全新容器，55 秒）
+
+| 检查项 | 结果 |
+| --- | --- |
+| `sys.boot_completed` | 1（55s） |
+| `ro.build.type` / `ro.build.tags` | user / release-keys |
+| `ro.debuggable` / `ro.secure` | 0 / 1 |
+| `init.svc.adbd` / adbd 进程 | 空 / 无 |
+| `/system/xbin/su` | 不存在 |
+| `/dev/video10`、`/dev/video11` | `crw-rw-rw- root 44` |
+| `dumpsys media.camera` | **Number of camera devices: 2**（Device 0/1 均可见 API1） |
+| RT：agent 应用 | `com.salespartner.workphone.agent` 运行中 |
+| `ro.adb.secure` | 读出 0（build.prop 写的是 1） |
+
+最后一行不是 bug：cmdline 带 `qemu=1`，init 按模拟器口径把 `ro.adb.secure` 覆盖成 0；
+adbd 已从 init 里摘除，这一项不影响“无 adb”的结论。
+
+### 9.5 三个版本的对比
+
+| | 0.1 | 0.2 | 0.3 |
+| --- | --- | --- | --- |
+| 基线 | rt1 镜像 | m6 运行态 | 0.2 |
+| 无 root / 无 adb | ✅ | ✅ | ✅ |
+| user / release-keys | ✅ | ✅ | ✅ |
+| RT 运行态在镜像里 | 部分 | ✅ | ✅ |
+| 相机可枚举 | 未测 | ❌（环境） | ✅ 2 个设备 |
+| SELinux 真强制 | ❌ | ❌ | ❌ |
+
+### 9.6 交付口径
+
+`g98/redroid-panthor-locked:0.3` 可以作为**对外演示/测试用的 hardened 容器**：
+没有 su、没有 adb、属性是 user/release-keys、开机 55 秒、相机能出 2 个设备、
+RT 的 agent 正常拉起。它**不是 locked phone**——SELinux 仍是 Disabled，
+TEE/Key Attestation 依然没有；身份类 App 的完整性判断不会因为这一版而改变。
+
