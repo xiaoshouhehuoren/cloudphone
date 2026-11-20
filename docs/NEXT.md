@@ -1,4 +1,4 @@
-# 待办与阻塞（2026-11-20）
+# 待办与阻塞（2026-11-21）
 
 ## 已完成
 - 6 台云手机（m1–m6）+ 相机 HAL（预览 / 拍照）+ 外部画面注入（静态图已验证）。
@@ -108,8 +108,8 @@
   成功；已 sync 到 `system/core`、`external/selinux`、`external/libdrm`、`external/minigbm`、`external/drm_hwcomposer`，
   全量 sync 在后台跑（`/opt/aosp`）。
 - **`platform/*` 前缀只是 repo 里的路径**：实际 checkout 是 `/opt/aosp/system/core`、`/opt/aosp/external/selinux`。
-- 关键待办：编干净的 `init`（撤掉 redroid 的 `selinux_setup`→`second_stage` 与 `se_hack` 两处补丁），
-  这是统一 SELinux 方案打通“进程打标签”的唯一缺口。
+- ~~关键待办：编干净的 `init`（撤掉 `selinux_setup`→`second_stage` 与 `se_hack`）~~
+  —— **已解决**，见下面「已完成 12」。
 
 
 ## 已完成 10：板子上 VM 路线打通（KVM + 板载内核 + binder，2026-11-20）
@@ -149,3 +149,39 @@
   验证：55s 开机、无 root/adb、`/dev/video10/11` = 666、**camera devices = 2**、RT agent 运行。
 - **口径**：这是 hardened container，不是 locked phone；SELinux 仍 Disabled，无 TEE。
 - 详见 `docs/locked-image.md` 第 9 节。
+- **注**：0.3 的“SELinux 仍 Disabled”已被下面「已完成 12」改写 —— 容器里已有真实 SELinux domain，
+  但强制力仍是 permissive。
+
+## 已完成 12：统一 SELinux 打通（容器真域分离）+ locked 0.9（2026-11-21）
+
+- **根因是两处源码**：`external/selinux` 提交 `085e5a0720` 用 `se_hack` 宏把 14 个函数变成空操作；
+  `system/core` 提交 `e7385bfc9d` 把 `first_stage_init.cpp` 里的 `{path,"selinux_setup"}` 换成
+  `{path,"second_stage"}`，**AOSP 的整套 policy 加载被整段跳过**；另外 `property_service.cpp` /
+  `service.cpp` 各插了一处 `se_hack1`，这是“进程进不了自己 domain”的直接原因。
+- **init 四轮才打对**（WSL `m -j16 init` 增量 16 秒）：init → init2（已加载则跳过）→
+  **init3（无条件 `set_selinuxmnt("/sys/fs/selinux")` 再递归 restorecon）**。
+  关键坑：`is_selinux_enabled()` 的 ANDROID 分支只看 `selinux_mnt` 是否非空，而
+  `selinux_android_restorecon_common()` 首句是 `if (is_selinux_enabled() <= 0) return 0;` ——
+  宿主已预加载 policy 时走 else 分支、不调 `set_selinuxmnt`，**restorecon 一个标签都没改却返回 0**。
+- **policy 要补 HAL transition**：先编出的 policy 与镜像自带 `precompiled_sepolicy`
+  字节一致（646,345 B / md5 `f09343b5…`），但跑起来 79 条 “no domain transition”——
+  redroid 从没用过 SELinux，vendor HAL 的 `(typetransition init <hal>_exec process <hal>)`
+  规则根本不存在。补两轮后 `policy-full3.bin` = **646,633 B / md5
+  `81f9da4aee2374226b962581de743300`**（11 个 HAL + `vendor_file → vendor_init`）。
+  `secilc` 只在镜像里有（`/system/bin/secilc`），**必须 docker cp 进容器再编**。
+- **开机自动加载**：`/etc/g98/policy-full3.bin` + `/usr/local/sbin/g98-load-selinux` +
+  `/etc/systemd/system/g98-selinux-policy.service`（`Before=docker.service`，已 enable）。
+- **locked 0.9** = `70c3a0d71ab7`（3.54GB）= 0.8 + 补回 `boot-framework.vdex`(514,612 B) +
+  build.prop 写 `ro.hardware.egl=mesa` + `/system/etc/init/zz-g98-nodes.rc`
+  （`/dev/video10–15`、`/dev/dri/card0`、`/dev/dri/renderD128` 各 `chmod 0666`）。
+- **l11 验证**：`boot_completed=1`（约 4 分钟，其中 59s 是 relabel）、user/release-keys、
+  `ro.debuggable=0`、无 adbd、无 su、104 个包、**相机 2 路**、RT agent 在线（u0_a58）；
+  **init / system_server / surfaceflinger / zygote64 / netd / vold / cameraserver 全部真实 domain**；
+  avc denied 里 `permissive=0` 的条数为 0。
+- **三个坑**：`/dev/dri/*` 660 → SurfaceFlinger `no suitable EGLConfig found` abort；
+  `ro.hardware.egl` 为空 → libEGL 选 ANGLE 然后失败；m6 的 `docker diff` 删过
+  `/system/framework/boot-framework.vdex`。ueventd 规则对继承来的 /dev 节点无效，必须 init rc chmod。
+- **口径**：**有 SELinux 域、没有 SELinux 强制**。内核侧是 `(typepermissive kernel)`，
+  `getenforce` 仍是 Permissive，所有 avc 只记不拦；不能对外说“enforcing”。
+  真 enforcing 需要给 Armbian 宿主每个进程也定义 domain，是独立的一大块工作。
+- 详见 `docs/locked-image.md` 第 10 节。

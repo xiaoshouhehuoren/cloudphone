@@ -763,3 +763,250 @@ adbd 已从 init 里摘除，这一项不影响“无 adb”的结论。
 RT 的 agent 正常拉起。它**不是 locked phone**——SELinux 仍是 Disabled，
 TEE/Key Attestation 依然没有；身份类 App 的完整性判断不会因为这一版而改变。
 
+> 注：0.3 的"SELinux 仍是 Disabled"已被第 10 节推翻 —— 2026-11-21 统一 SELinux 打通，
+> 容器里的 init / system_server / zygote / surfaceflinger 等已进入各自的真实 domain。
+> 但**内核侧仍是 permissive**（见 10.7），所以它离"真 enforcing"还差一步。
+
+## 10. 统一 SELinux 打通：容器里真域分离 + locked 0.9（2026-11-21）
+
+第 4.8 节确认了架构约束：selinuxfs 没有 namespace，**一个内核只有一份 policy**。
+所以"每台云手机一个独立 SELinux"做不到；能做的是**整板加载一份 Android 13 policy，
+让每个容器里的进程在 init 启动时被 restorecon 打标、按 policy 进入各自的 domain**。
+这一节记录这条路怎么走通的，以及 0.9 镜像。
+
+### 10.1 根因：redroid 把 SELinux 关在两处
+
+| 位置 | 做法 | 后果 |
+| --- | --- | --- |
+| `external/selinux`（提交 `085e5a0720` "ignore selinux"） | `selinux.h` 里加 `#define se_hack() if (1) return`，14 个函数首行插入 | `selinux_android_load_policy`、`security_getenforce`、`selinux_check_access`、`selinux_android_restorecon_common`、`getfilecon/lgetfilecon/getpeercon`（返回字面量 `"HACKED"`）等全部变成空操作 |
+| `system/core`（提交 `e7385bfc9d` "fix booting"） | `first_stage_init.cpp` 把 `{path,"selinux_setup"}` 改成 `{path,"second_stage"}`，直接从 `/proc/self/cmdline` 取容器参数 exec | **AOSP 的整套 SELinux 初始化（LoadSelinuxPolicy → set_selinuxmnt → security_load_policy）都在 selinux_setup 阶段，被整段跳过**，所以容器里 `/sys/fs/selinux/policy` 永远是 0 字节 |
+
+同一个 `fix booting` 提交还在 `init/property_service.cpp`（`se_hack1(true)`）和
+`init/service.cpp`（`se_hack1("HACKED")`）插了两处 hook —— 这两处让我们后面
+"进程进不了自己的 domain"卡了很久。
+
+### 10.2 编 init：四轮才打对
+
+WSL 里 `/opt/aosp` 已全量 sync（103G），把 `system/core` 换成 redroid fork
+（`redroid-13.0.0_r74`）再打补丁，`m -j16 init` 增量只要 **16 秒**。
+
+| 轮次 | 改动 | 结果 |
+| --- | --- | --- |
+| init | 删两处 `se_hack`；policy 为空时读 `/vendor/etc/selinux/precompiled_sepolicy` 并 `security_load_policy()` | 容器 `Exited 129`；dmesg 有 `SELinux: loaded policy`，但随后 apexd → boringssl → vold 一路 `reboot_on_failure` |
+| init2 | 宿主已有 policy 就跳过加载 | 能跑到 `relabel /system rc=0`（**假的**，见下） |
+| init3 | 在 relabel 之前**无条件** `set_selinuxmnt("/sys/fs/selinux")` | **打通**：init 进 `u:r:init:s0`，APEX 挂 25 个，zygote/system_server 拿到真实 domain |
+
+**关键坑（值得单独记）**：`libselinux` 的 `is_selinux_enabled()` 在 Android 下只看一个全局变量：
+
+~~~c
+/* external/selinux/libselinux/src/enabled.c */
+int is_selinux_enabled(void) {
+#ifdef ANDROID
+    return (selinux_mnt ? 1 : 0);
+~~~
+
+而 `selinux_android_restorecon_common()` 第一句就是
+`if (is_selinux_enabled() <= 0) return 0;`。
+我们的 init2 只在"policy 未加载"的分支里调 `set_selinuxmnt()`；
+宿主已经预加载 policy 时走的是 else 分支，`selinux_mnt` 为 NULL，
+**restorecon 一个标签都没改却返回 0** —— 日志里那句 `relabel /system rc=0` 是假的。
+
+init3 的补丁形态（`first_stage_init.cpp`，`const char* path = "/system/bin/init";` 之后）：
+
+~~~cpp
+set_selinuxmnt("/sys/fs/selinux");
+LOG(INFO) << "SELinux: relabeling container rootfs, enabled=" << is_selinux_enabled();
+int rc_sys = selinux_android_restorecon("/system", SELINUX_ANDROID_RESTORECON_RECURSE);
+LOG(INFO) << "SELinux: relabel /system rc=" << rc_sys;
+/* /vendor /product /system_ext /odm 同样各带一行 rc 日志 */
+if (selinux_android_restorecon("/system/bin/init", 0) == -1) {
+    PLOG(ERROR) << "SELinux: restorecon /system/bin/init failed";
+}
+~~~
+
+产物 `init` = **2,094,040 B，md5 349b6eee2742bec16ee85a5a7b90dec1**。
+真跑起来后 `/system` 的递归 relabel 耗时 **58.7 秒**（dmesg 26800.02 → 26858.79），
+这是启动变慢的主要原因，不是卡死。
+
+### 10.3 policy 本身要补 HAL transition
+
+镜像里自带的 `/vendor/etc/selinux/precompiled_sepolicy`（646,345 B，md5 `f09343b59ea391f8e8c82921476ffdde`）
+和我们用 CIL 重编出来的 `policy-full.bin` **字节一致** —— 说明"从镜像自己的 CIL 编一份 policy"
+这条路没有信息损失，可以直接在容器里用 `/system/bin/secilc` 重编：
+
+~~~bash
+/system/bin/secilc -m -M true -G -N -c 33 -o policy.bin \
+  plat_sepolicy.cil plat_pub_versioned.cil vendor_sepolicy.cil extra.cil
+~~~
+
+（`-M` 必须带布尔值，`-c` 后接整数；参数写错会直接打印 usage 而不是报行号。）
+
+第一版跑起来后有 **79 条** "no domain transition"，例如：
+
+~~~
+File /system/bin/apexd (labeled "u:object_r:apexd_exec:s0") has incorrect label or
+no domain transition from u:r:init:s0 to another SELinux domain defined.
+~~~
+
+因为 redroid 的 SELinux 从来没生效过，**vendor HAL 的 `(typetransition init <hal>_exec process <hal>)`
+规则在 policy 里根本不存在**。用 `extra.cil` 逐批补：
+
+~~~cil
+(typepermissive kernel)                                   ; 让 Armbian 宿主存活
+(typetransition init hal_camera_default_exec process hal_camera_default)
+(allow init hal_camera_default (process (transition rlimitinh siginh noatsecure)))
+(allow hal_camera_default hal_camera_default_exec (file (read open getattr map execute)))
+~~~
+
+补了两轮（`extra2.cil` 补 audio/camera/keymaster，`extra3.cil` 再补
+cas/graphics_allocator/graphics_composer/health/power/wifi/mediacodec/rild，
+以及 4 个 `vendor_file` 脚本走 `vendor_init`），最终
+**`policy-full3.bin` = 646,633 B，md5 `81f9da4aee2374226b962581de743300`**。
+用 `/srv/redroid/selinux/selinux_load`（open `/sys/fs/selinux/load` + write 整块）加载，
+宿主 `systemctl is-system-running` 仍是 `degraded`（只有既有的 `g98-campush` 与
+`NetworkManager-wait-online` 两个失败单元），m1–m6 不受影响。
+
+### 10.4 开机自动加载 policy
+
+policy 必须**在容器启动之前**就位（否则第一个容器自己去 load，时序不可控）。
+板上装了 systemd 单元：
+
+~~~ini
+# /etc/systemd/system/g98-selinux-policy.service
+[Unit]
+Description=G98 unified SELinux policy loader
+DefaultDependencies=no
+Before=docker.service
+After=local-fs.target
+ConditionPathExists=/etc/g98/policy-full3.bin
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/g98-load-selinux
+
+[Install]
+WantedBy=multi-user.target
+~~~
+
+`/usr/local/sbin/g98-load-selinux` 先看 `/sys/fs/selinux/policy` 大小，
+为空才 `exec /usr/local/sbin/selinux_load /etc/g98/policy-full3.bin`。
+已 `systemctl enable`，重启后自动生效。
+
+### 10.5 locked 0.9 的构建
+
+在 0.8（init3 + 全树 relabel 过的 0.7b）基础上补三件事：
+
+~~~bash
+docker create --name l9prep g98/redroid-panthor-locked:0.8 /init
+# 1) 补回被 m6 删掉的 boot-framework.vdex（否则 ART 每轮都报 image 校验失败）
+docker cp /srv/redroid/l4/boot-framework.vdex l9prep:/system/framework/boot-framework.vdex
+# 2) ro.hardware.egl 必须显式写 mesa（为空时 libEGL 会选 ANGLE 然后 eglInitialize 失败）
+echo "ro.hardware.egl=mesa" >> /tmp/bp9 && docker cp /tmp/bp9 l9prep:/system/build.prop
+echo "ro.hardware.egl=mesa" >> /tmp/vbp9 && docker cp /tmp/vbp9 l9prep:/vendor/build.prop
+# 3) 设备节点权限（见 10.6 的坑）
+docker cp /tmp/zz-g98-nodes.rc l9prep:/system/etc/init/zz-g98-nodes.rc
+docker commit --change 'CMD ["qemu=1","androidboot.hardware=redroid","ro.hardware.gralloc=g98","ro.hw_timeout_multiplier=10"]' \
+  l9prep g98/redroid-panthor-locked:0.9       # 70c3a0d71ab7, 3.54GB
+~~~
+
+`/system/etc/init/zz-g98-nodes.rc`：
+
+~~~
+on early-init
+    chmod 0666 /dev/video10
+    chmod 0666 /dev/video11
+    chmod 0666 /dev/video12
+    chmod 0666 /dev/video13
+    chmod 0666 /dev/video14
+    chmod 0666 /dev/video15
+    chmod 0666 /dev/dri/card0
+    chmod 0666 /dev/dri/renderD128
+~~~
+
+### 10.6 三个让 Android 用户态起不来的坑
+
+**坑 1：`/dev/dri/*` 权限 660，SurfaceFlinger 直接 abort。**
+现象：`RenderEngine with GLES Backend` → `eglInitialize failed (EGL_NOT_INITIALIZED)` →
+`no suitable EGLConfig found, giving up` → SIGABRT。
+m6 里这些节点是 `crw-rw-rw-`，locked 系列里是 `crw-rw---- root video`。
+`chmod 666 /dev/dri/*` 后 SF 立刻 `running`，EGL 正常。
+**注意 `/system/etc/ueventd.rc` 里明明有 `/dev/dri/* 0666 root graphics`，
+但节点是继承来的（/dev 是容器自己的 tmpfs，节点由宿主 uevent 灌进来），规则不生效**，
+所以在 init 里 chmod 才是可靠做法。
+
+**坑 2：`ro.hardware.egl` 为空 → 选错 ANGLE。**
+空值时 `libEGL` 加载 `/vendor/lib64/egl/libEGL_angle.so`，然后
+`initializeAnglePlatform failed to get valid ANGLE library filename suffix!` 退出。
+m6 的 cmdline 里带 `ro.hardware.egl=mesa`，我们起容器时漏了。已写进 build.prop。
+
+**坑 3：`boot-framework.vdex` 被删。**
+m6 的 `docker diff` 里有 `D /system/framework/boot-framework.vdex`（之前调试留下的），
+而 `arm/boot-framework.vdex`、`arm64/boot-framework.vdex` 是 `-> ../boot-framework.vdex` 的软链。
+zygote 报 `File /system/framework/arm64/boot-framework.vdex does not exist`。
+从 `g98/redroid-panthor-rt:13` 取回（514,612 B）后，ART 至少不再因缺文件重编译 boot image。
+
+**坑 4（遗留）：framework.jar 有 5 个 dex，boot image 是按 4 个编的。**
+RT 的 `framework.jar`（md5 `7d40c1040fd37f3f9d94d997ae2f397c`）多打了一个 `classes5.dex`，
+补回 vdex 之后 ART 会报
+`expected 4 uncompressed dex files, but found 5 in '/system/framework/framework.jar'`。
+m6 能容忍是因为它的 `ro.debuggable=1`；0.9 用 `ro.debuggable=0` 一样能开机，
+说明这条报错只是 **fallback 路径**（ART 放弃 boot image、直接从 jar 走 JIT），
+代价是首次启动慢一些。要彻底干净得用 `dex2oat` 按 5-dex 重编 boot image（未做）。
+
+### 10.7 locked 0.9 验证（l11 全新容器，`ro.debuggable=0`）
+
+启动命令（**不带** `ro.hardware.egl`、**不带** `ro.debuggable`，全走镜像）：
+
+~~~bash
+docker run -d --name l11 --privileged --cap-drop SYS_BOOT --memory=3g \
+  -v /srv/redroid/camcfg/cam0-external_camera_config.xml:/vendor/etc/external_camera_config.xml:ro \
+  -v /srv/redroid/l11data:/data g98/redroid-panthor-locked:0.9 \
+  qemu=1 androidboot.hardware=redroid ro.hardware.gralloc=g98 ro.hw_timeout_multiplier=10
+~~~
+
+| 检查项 | 结果 |
+| --- | --- |
+| `sys.boot_completed` | **1**（期限约 4 分钟，其中 59s 是 relabel） |
+| `ro.build.type` / `ro.build.tags` | user / release-keys |
+| `ro.debuggable` / `ro.secure` | **0** / 1 |
+| `init.svc.adbd` / adbd 进程 | 空 / 无 |
+| `/system/xbin/su` | 不存在 |
+| `getenforce` | **Permissive**（内核侧，见下） |
+| init(1) | **`u:r:init:s0`** |
+| system_server | **`u:r:system_server:s0`** |
+| surfaceflinger | **`u:r:surfaceflinger:s0`** |
+| zygote64 | **`u:r:zygote:s0`** |
+| cameraserver / netd / vold | `u:r:cameraserver:s0` / `u:r:netd:s0` / `u:r:vold:s0` |
+| APEX 挂载 | 25 个，`apexd.status=ready` |
+| `cmd package list packages` | 104 个 |
+| `dumpsys media.camera` | **Number of camera devices: 2** |
+| `/dev/video10`、`/dev/dri/card0` | `crw-rw-rw-` |
+| RT：`com.salespartner.workphone.agent` | 运行中（u0_a58） |
+| avc denied 中 `permissive=0` 的条数 | 0（所有 deny 都带 permissive=1） |
+
+**这意味着什么**：容器里的 Android 第一次跑在**真实的 SELinux domain** 上
+（不是 `u:r:kernel:s0`、不是 `HACKED`），并且 `ro.debuggable=0`、无 su、无 adbd、
+相机两路、RT 在跑。这是 0.3 做不到的。
+
+**还差什么（必须写清楚）**：
+
+- 内核侧是 `(typepermissive kernel)` + 各 domain 全 permissive ——
+  `getenforce` 仍是 **Permissive**，所有 avc 只记不拦。
+  要真 enforcing，得给 Armbian 宿主的每个进程也定义 domain（否则一 enforce 宿主就死），
+  这是独立的一大块工作，不在 0.9 范围内。
+- `ro.adb.secure` 读出 0（`qemu=1` 覆盖）；
+- `android.hardware.camera.provider@2.7-external-service` 仍因 VINTF 缺失反复崩溃
+  （m6 也一样），实际出图走 2.4 legacy provider；
+- 无 TEE / Key Attestation（容器硬伤，不变）。
+
+### 10.8 一句话总结
+
+**统一 SELinux 在 G98 上成立了**：整板一份 Android 13 policy（`policy-full3.bin`，
+开机由 `g98-selinux-policy.service` 预加载），容器 init 启动时递归 relabel 自己的
+`/system /vendor /product /system_ext /odm`，进程按 policy 进入 init / system_server /
+zygote / surfaceflinger / netd / vold / cameraserver 等真实 domain，Android 能完整开机
+（`boot_completed=1`、104 个包、2 路相机、RT 在线）。
+但**强制力仍是 permissive**：这版是"有 SELinux 域、没有 SELinux 强制"，
+可以对外说"容器里 SELinux 是开着的、进程有 domain"，**不能说"enforcing"**。
+
