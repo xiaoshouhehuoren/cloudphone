@@ -511,10 +511,20 @@ stdin 用 `mkfifo vm2.in` + `tail -f cmds2.txt > vm2.in` 驱动，否则 QEMU �
    （日志里跟一条 `init: Sending signal 9 to service 'zygote' ... process group`）。
    把 `init.zygote64_32.rc` 里的 `task_profiles` 行删掉后 zygote 稳定存活。
 3. **显示栈是硬缺口**：`vendor.hwcomposer-2-1`、`vendor.gralloc-2-0` 在 QEMU virt 里
-   `exited with status 1`（G98 的 gralloc/HWC 依赖 panthor/DRM，VM 没有这块 GPU），
-   于是 surfaceflinger 反复 `Fatal signal 6 (SIGABRT)`，servicemanager 报
-   `Could not find 'aidl/SurfaceFlinger' for ctl.interface_start`，
+   `exited with status 1`，于是 surfaceflinger 反复 `Fatal signal 6 (SIGABRT)`，
+   servicemanager 报 `Could not find 'aidl/SurfaceFlinger' for ctl.interface_start`，
    没有 SurfaceFlinger 就没有 UI，`sys.boot_completed` 也就不会置位。
+   根因（把镜像里的 HAL 拆出来看）：
+   - `/vendor/lib64/hw/gralloc.redroid.so`（20,056 B）的字符串里有
+     `FBIOPUT_VSCREENINFO failed`、`FBIOPUT_VSCREENINFO failed, page flipping not supported`
+     —— 它走的是 **fbdev**（`/dev/fb0`），QEMU virt 上没有 framebuffer 设备，初始化直接失败；
+   - `/vendor/lib64/hw/hwcomposer.redroid.so`（48,000 B）的字符串全是
+     `bind socket [%s] failed` / `connect to %s failed` / `send handle failed`，
+     说明它不是本地合成器，而是**通过 UNIX socket 跟宿主侧的 redroid composer 通信**，
+     VM 里没有这个对端。
+   所以 VM 的显示不是"缺 GPU 驱动"，而是缺**fbdev 后端 + 宿主侧 composer 对端**：
+   要么给 virtio-gpu 配 AOSP 的 `hwcomposer.drm`/minigbm（新构建任务），
+   要么在 guest 里提供一个 ramfb/simpledrm 的 `/dev/fb0` 和一个 composer 对端。
 
 所以 VM 路线**不是内核问题，是显示问题**：要让 Android 在 VM 里真正可用，得给
 virtio-gpu 配一个软件 HWC（AOSP 的 `hwcomposer.drm`/minigbm，或 emulator 的 ranchu
