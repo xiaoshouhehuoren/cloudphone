@@ -10,6 +10,7 @@
 | `docs/HANDOFF.md` | 交接文档：硬件、容器、相机 HAL 的全部状态与复现步骤 |
 | `docs/G98-踩坑全记录.md` | 100+ 轮踩坑记录（含本轮相机/推流新增章节） |
 | `docs/G98-运维手册.md` | 日常运维：容器、ADB、串流、面板 |
+| `docs/rt-wechat-coverage.md` | RT（Hook Runtime）控制微信的能力对照与移植评估 |
 | `hal/arc/` | 自写 libyuv shim、JPEG 编码器（jo_jpeg）、arc/ 源 |
 | `hal/camera3_4/` | 改过的 AOSP camera HAL 3.4 源码（V4L2 wrapper、元数据、多流） |
 | `build/_rehal7.sh` | 用 NDK 交叉编译 `camera.redroid.so`（Linux/Windows MSYS 均可） |

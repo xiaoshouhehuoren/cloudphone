@@ -24,3 +24,8 @@
 - 工具：`tools/wechat_adb.sh`（start/focus/ui/tap/tap-text/text/shot）+ `tools/ui_find.py`（按文字找控件坐标）。
 - 实测：启动页 → 点 Log In → 手机号页 → 输入号码成功（截图 `_wx_demo.png`）。
 - 剩余：登录需手机号+短信验证码（真人参与），登录后才能写「进聊天发消息」。
+
+## 已完成 4：RT 控制微信能力评估（2026-11-20）
+- 对照 `xiaoshouhehuoren-rom` / `-app` / `workphone-channel` 源码，逐项评估 12 项能力：✅ 4 / ⚠️ 4 / ❌ 4。
+- 结论：底座（root、系统镜像、Binder、预装 App）覆盖；RT 本体（`libsalespartner_rt.so` + Probe 注入 + framework 补丁）需 Android 13 移植，约 1–2 周。
+- 详细矩阵与实施阶段：`docs/rt-wechat-coverage.md`。
