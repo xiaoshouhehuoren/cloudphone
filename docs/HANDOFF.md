@@ -51,6 +51,8 @@ ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password \
 
 **m6 已升级为带相机 HAL 的镜像 `g98/redroid-panthor-cam15:13`（原 /data 不变）—— 预览 + 拍照都可用的最终版。**
 
+**RT 版镜像 `g98/redroid-panthor-rt-rt1:13`（cam15 + RT 注入 + fake lmkd + Agent/Probe）已在 m6 验证，详见 `docs/rt-implementation.md`。**
+
 ### 微信
 6 台全部安装（`/root/wechat860.apk`），已验证可登录。
 

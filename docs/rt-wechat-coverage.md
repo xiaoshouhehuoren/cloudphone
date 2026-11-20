@@ -3,6 +3,8 @@
 > 结论先说：**底座（设备、系统镜像、root、Binder、预装 App）我们能覆盖；RT 本体（libsalespartner_rt.so + Probe 注入）目前不覆盖，需要一次 Android 13 移植。**
 > 技术上可行（源码、root、可改镜像都有），但有三个硬点：ART/LSPlant 版本适配、framework（ActivityThread）注入点、system_server 的 system_broker。
 > 如果只是把微信跑起来、用 UI 自动化做加好友/发消息，现有方案已经能用；要拿到通讯录/历史消息/未读/媒体哈希这类进程内数据，必须走 RT。
+>
+> **2026-11-20 更新：Android 13 / redroid 的 RT 移植已落地并验证，见 `docs/rt-implementation.md`。本文保留为原始能力矩阵与移植依据。**
 
 本文对照 `xiaoshouhehuoren-rom`、`xiaoshouhehuoren-app`、`workphone-channel` 三个仓库的源码，逐项判断我们（RK3588 + redroid Android 13 云手机）的覆盖情况。
 

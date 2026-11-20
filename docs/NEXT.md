@@ -29,3 +29,10 @@
 - 对照 `xiaoshouhehuoren-rom` / `-app` / `workphone-channel` 源码，逐项评估 12 项能力：✅ 4 / ⚠️ 4 / ❌ 4。
 - 结论：底座（root、系统镜像、Binder、预装 App）覆盖；RT 本体（`libsalespartner_rt.so` + Probe 注入 + framework 补丁）需 Android 13 移植，约 1–2 周。
 - 详细矩阵与实施阶段：`docs/rt-wechat-coverage.md`。
+
+## 已完成 5：RT 控制微信落地（2026-11-20）
+- m6 上已跑通：framework.jar 的 `ActivityThread.handleBindApplication` 注入 `SalesPartnerHookRuntime.maybeBoot`，微信进程加载 `libsalespartner_rt.so`，Probe `probe_state=ready`。
+- Probe→Agent Binder `authenticated`；Agent 1.15.1 / Probe 1.11.3，UI 显示 **在线 / 服务器已连接**；mock Channel 心跳正常。
+- 固化镜像：`g98/redroid-panthor-rt-rt1:13`（sha256 `627637390ce3...`，1.81GB）；Camera2 设备数仍为 2。
+- 关键兼容层：fake lmkd（否则 redroid 的 system_server 在 `LmkdConnection.waitForConnection` 持锁卡死所有 App 启动）。
+- 复现/构建/已知限制：`docs/rt-implementation.md`；验证截图：`screenshots/rt-agent-online.png`。
