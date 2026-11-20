@@ -36,3 +36,15 @@
 - 固化镜像：`g98/redroid-panthor-rt-rt1:13`（sha256 `627637390ce3...`，1.81GB）；Camera2 设备数仍为 2。
 - 关键兼容层：fake lmkd（否则 redroid 的 system_server 在 `LmkdConnection.waitForConnection` 持锁卡死所有 App 启动）。
 - 复现/构建/已知限制：`docs/rt-implementation.md`；验证截图：`screenshots/rt-agent-online.png`。
+
+## 已完成 6：locked image 0.1（2026-11-20）
+
+- 基于 rt1 做成 `g98/redroid-panthor-locked:0.1`（sha256 `7e1d5639...`）：关 adbd、删 su、`ro.build.type=user` / `release-keys` / `ro.debuggable=0`。
+- locktest2 验证：`sys.boot_completed=1`、`init.svc.adbd` 为空、无 adbd 进程、`/system/xbin/su` 不存在。
+- 仍未完成：SELinux enforcing（`getenforce=Disabled`）。原因与后续路线见 `docs/locked-image.md`。
+
+## 阻塞：SELinux enforcing（2026-11-20）
+
+- redroid 在源码里故意关闭 SELinux（维护者确认：`external/selinux`、`system/core`、`frameworks/native` 的 libselinux hook）；容器参数、bind `/proc/cmdline`、改 init 都不能打开。
+- SELinux policy 是内核全局的，G98 宿主 Armbian 没有 Android policy；容器里强行加载会影响 m1–m6 和宿主。
+- 要真 enforcing 只能上 VM/独立内核，或自己编 Android + 撤补丁 + 定制 sepolicy；当前 redroid 架构下不做。
