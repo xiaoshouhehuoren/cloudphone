@@ -68,3 +68,40 @@
 - **这块 G98 上编不了**：aarch64 宿主，AOSP 官方不支持（`Building Android requires a x86-64 machine`）；`.repo` 只有 6.7M，源码从未 sync；板子无 default route，DNS 全失败；无 clang/ninja。
 - 下一步只能是另备 x86_64 Linux 构建机（400G+ 磁盘、AOSP 13 + redroid manifest）重编，或改走 VM/独立内核。
 - 宿主 Armbian 与容器共享内核 policy；测试可用 `kernel` permissive 保住宿主，但这不是生产隔离方案。
+
+## 已完成 9：SELinux 关闭的真正位置（源码级，2026-11-20）
+
+- **内核不是阻塞点**：把 617,235 B 的 Android policy 真写进 `/sys/fs/selinux/load` 成功（rc=0），
+  `class` 从 0 变 103，`property_service`/`service_manager`/`hwservice_manager`/`keystore_key` 全部出现，
+  dmesg 无 "Unknown class"。之前"内核缺 classmap"的判断（数 strings）是错的。
+- **真正的原因在 init**：redroid 的 `system/core` 提交 `e7385bfc9d`"fix booting" 把 first stage 的
+  `execv("/system/bin/init", {"selinux_setup"})` 改成 `{"second_stage"}` —— 专门加载 policy 的
+  `selinux_setup` 阶段被整段跳过，所以 `/sys/fs/selinux/policy` 恒为 0。同一个 commit 还在
+  `property_service.cpp` 的 `CheckMacPerms()`、`service.cpp` 的 `ComputeContextFromExecutable()`
+  里插了 `se_hack1`。
+- **libselinux 的 hook 很小**：`085e5a0720`"ignore selinux" 只改了 14 个函数，靠宏
+  `#define se_hack()  if (1) return` / `se_hack1(p) if (1) return p` 实现。
+- **架构结论（关键）**：`/sys/fs/selinux` 在宿主和 m6 里是同一个 dev/inode（dev 23 ino 1），
+  selinuxfs 无 namespace，**一个内核只有一份 policy**。红旭容器模型下，Armbian 宿主 +
+  m1–m6 共享一份 policy，**不可能做到每实例独立 SELinux 强制**。
+  => 路线 B（重编 AOSP 撤补丁）即使编成功也拿不到"每实例真强制"，**不再作为可行方案推进**。
+- 详见 `docs/locked-image.md` 4.7 / 4.8。
+
+## 已具备：VM 路线的硬件条件（2026-11-20）
+
+- `/dev/kvm` 可用：自写 C 探针实测 `KVM_GET_API_VERSION=12`、`KVM_CREATE_VM`、`KVM_CREATE_VCPU` 全成功；GICv3 就绪。
+- 板子经 Windows 反向代理（`tmp_g98_proxy_tunnel.py`，本机 8899 → 板子 127.0.0.1:8899）恢复公网，
+  `apt-get install qemu-system-arm` 成功，`/usr/bin/qemu-system-aarch64` 就位（1:10.0.13+ds-0+deb13u1，RC=0）。
+- 资源：8 核 / 15.9GB（可用约 9.9GB）/ 剩 402G；guest 系统可用 `/root/gsi13/system.img` + `vbmeta.img`。
+- **缺口**：GSI 没有可引导的内核；板上 `/root/g98-kernel-6.1.115/Image` 是带板级驱动的内核，
+  在 QEMU `virt` 上大概率起不来，需要一个通用 arm64 内核（需 mainline 源码）。
+
+## 阻塞：WSL 构建机（2026-11-20）
+
+- `Microsoft-Windows-Subsystem-Linux` 与 `VirtualMachinePlatform` 已启用（提权 dism 完成），
+  但 `Component Based Servicing\RebootPending` 仍在 —— **必须重启 Windows 才能生效**，尚未重启。
+- 本机 in-box `wsl.exe` 是存根，缺 kernel；需装 WSL MSIX 包。712MB 的
+  `Microsoft.WSL_3.0.5.0_x64_ARM64.msixbundle` 正在后台下载（0.3–1.7MB/s）；
+  另有 47MB 快速备选（`wsl_update_x64.msi` 17MB + `ubuntu-base-24.04` rootfs 30MB）已下齐在 `.tmp_wsl/`。
+- 注意：**即使 WSL 装好，AOSP 全量 `repo sync` 在本机 0.13–0.5MB/s 的出口带宽下也不现实**（>80 小时）。
+

@@ -276,6 +276,126 @@ stock 和 redroid 的用户态启动流程从第一条指令起就不兼容。
 redroid 的 SELinux 关闭是**横跨 libselinux + init + binder 的一整套**，且 init 的
 first-stage 流程本身被改过；要撤掉它，必须重编这三个模块，即回到完整的 AOSP 构建。
 
+### 4.7 实测：这个内核**接受** Android 的 SELinux policy
+
+先说结论：**之前"内核不支持 Android SELinux class"的判断是错的**，
+用一次真加载实验推翻了它。加载 Android policy 到 G98 的 Armbian 内核，成功。
+
+**此前的错误推理**：拿 `strings` 数内核镜像里 `property_service`、`service_manager`、
+`hwservice_manager`、`keystore_key` 的出现次数，得到 0，就推断内核缺少 Android
+的 `classmap`。这个推理从根上不成立 —— **SELinux 的 class 与 permission 定义来自
+policy 本身，不是内核二进制里的字符串常量**，所以数不到字符串完全正常。
+
+**正确的验证方式（真加载）**：
+
+    cd /srv/redroid/selinux
+    ./selinux_load policy-kernel-permissive.bin      # 617,235 B，含 (typepermissive kernel)
+    # loaded 617235 bytes, rc=0
+
+结果：
+
+| 检查项 | 加载前 | 加载后 |
+| --- | --- | --- |
+| `wc -c /sys/fs/selinux/policy` | 0 | 617235 |
+| `ls /sys/fs/selinux/class \| wc -l` | 0 | **103** |
+| `/sys/fs/selinux/class/property_service` | 不存在 | 存在，perm = `set` |
+| `/sys/fs/selinux/class/service_manager` | 不存在 | 存在，perm = `add/find/list` |
+| `/sys/fs/selinux/class/hwservice_manager` | 不存在 | 存在 |
+| `/sys/fs/selinux/class/keystore_key` | 不存在 | 存在 |
+| `/sys/fs/selinux/class/zygote` | 不存在 | 仍不存在（这份 policy 里没编进去） |
+
+dmesg 只有一条反向提示 `SELinux: Class user_namespace not defined in policy`
+（内核有、policy 没有，permissive 下无害），**没有任何 "Unknown class" 报错**。
+
+再做 `echo 1 > /sys/fs/selinux/enforce`（policy 里 `(typepermissive kernel)`）：
+
+- 宿主 `systemctl is-system-running` = degraded（两个既有失败单元：
+  `g98-campush.service`、`NetworkManager-wait-online.service`，与 SELinux 无关）；
+- m1–m6 全部 Up，m6 `sys.boot_completed`=1、`system_server`/`zygote` 存活、
+  `dumpsys window` 正常无 ANR；
+- 容器内读 `/sys/fs/selinux/enforce` = **1**；
+- 期间约 180 条 avc denied，全部 `permissive=1`，没有实际拦截；
+- 之后已把宿主 `enforce` 复位为 0（policy 加载后无法卸载，下次重启自动消失）。
+
+**这意味着什么（以及为什么它还不够）**：
+
+1. 内核不是阻塞点。redroid 镜像里 `libselinux` 把 `selinux_android_load_policy`
+   编成 no-op，才是"容器里永远 Disabled"的直接原因；把这个 no-op 换成真实现，
+   policy 是能加载进去的 —— 路线 B 在技术上是通的。
+2. 但**加载 ≠ 有效强制**。当前是个 `(typepermissive kernel)` 的折中 policy：
+   容器里所有进程都在 `u:r:kernel:s0`（permissive），所以 `enforce=1` 只是
+   **名义上的 Enforcing**，任何一条 avc 都不会真拦。要变成真强制，就得给
+   init/zygote/app 分域，而这又要求 redroid 的 init 走完整的 Android SELinux 流程。
+3. 因此 4.6 的结论不变：**必须重编 userspace（libselinux + init + binder）**，
+   只是原因从"内核不支持"改成"redroid userspace 主动关掉了 SELinux"。
+
+用一句话区分两条路线的价值：
+
+- 想让 App 里 `getenforce` 显示 `Enforcing`：今天就能做到（加载这份 policy + enforce=1），
+  但它是名义强制，属于"看起来像"，本仓库明确不做这种伪装；
+- 想真正获得 SELinux 强制：仍然要重编 userspace，且要让 per-domain 策略自洽。
+
+### 4.8 根因：redroid 在 init 里**直接跳过了 `selinux_setup` 阶段**
+
+4.7 说明了"内核没拦着"，但没回答"为什么 policy 一直没被加载"。查了 redroid 的
+源码 fork，答案很干脆：**它把开机流程里专门负责加载 SELinux policy 的那一段删了**。
+
+证据一，`remote-android/platform_system_core` 分支 `redroid-13.0.0_r74`，
+提交 `e7385bfc9d`"fix booting"（`init/first_stage_init.cpp`）：
+
+    -    const char* args[] = {path, "selinux_setup", nullptr};
+    +    std::vector<const char *> args = {path, "second_stage"};
+    +    { // 把 /proc/self/cmdline 里的容器参数原样塞进 argv
+    +        ... ReadFileToString("/proc/self/cmdline", &cmdline); ...
+    +    }
+    -    execv(path, const_cast<char**>(args));
+    +    execv(path, const_cast<char**>(args.data()));
+
+AOSP 的第一阶段在 `execv("/system/bin/init", {"selinux_setup"})` 之后会进入
+`LoadSelinuxPolicy()` → `set_selinuxmnt("/sys/fs/selinux")` →
+`security_load_policy()`，那才是 policy 真正写进内核的地方。redroid 直接把
+目标从 `selinux_setup` 改成 `second_stage`，这一整段就再也不会执行 ——
+**这就是容器里 `/sys/fs/selinux/policy` 恒为 0、`class` 恒为 0 的原因**，
+和内核、和 libselinux 的 no-op 都只是"配套"关系。
+
+证据二，同一个 commit 还在 init 自己的调用点里塞了 `se_hack1`：
+
+    init/property_service.cpp:  CheckMacPerms()            + se_hack1(true);       // HACKED
+    init/service.cpp:           ComputeContextFromExecutable() + se_hack1("HACKED");
+
+也就是说，**即使把 selinux_setup 加回来、policy 加载成功，init 也会跳过属性权限检查
+和 service 的 SELinux 上下文推导**，照样不是真正的强制。
+
+证据三，`external/selinux` 的 `085e5a0720`"ignore selinux" 一共只改了 14 个函数
+（`selinux_android_load_policy`、`security_getenforce`、`selinux_check_access`、
+`selinux_android_restorecon_common`、`selinux_android_setcon`、
+`selinux_android_setcontext`、`getfilecon`/`lgetfilecon`/`getpeercon`、
+`setprocattrcon`/`getprocattrcon`、`selabel_lookup_best_match`、`set_selinuxmnt`、
+`selinux_status_open`、`selinux_android_service_open_context_handle`），
+做法是加了个宏：
+
+    #define SE_HACK
+    #define se_hack()  if (1) return
+    #define se_hack1(p) if (1) return p
+
+**这反而是个好消息**：改动小、位置明确，理论上只要重编 `external/selinux`
+（一个约 14MB 的仓库）就能拿回"能加载 policy"的 libselinux。但如上，光有库不行，
+init 的 `selinux_setup` 和两处 `se_hack1` 也得一起改回来 —— **init 必须重编**。
+
+**架构层面的硬约束（比"编不出来"更致命）**
+
+`/sys/fs/selinux` 在宿主和 m6 里是**同一个 dev/inode**（dev 23 ino 1），
+selinuxfs 没有 namespace：**一个内核只有一份 policy**。G98 上 Armbian 宿主 + m1–m6
+六台容器共用同一个内核，所以：
+
+- 容器自己 `echo ... > /sys/fs/selinux/load` 直接被拒（实测 rc=1，即使 privileged）；
+- 就算在容器里加载成功，那份 policy 会同时作用于**宿主和全部六台容器**；
+- 六台实例无法各自持有不同 policy（真机/云手机产品里每台实例是独立内核的 VM）。
+
+结论：**红旭这种容器模型在架构上不可能提供"每实例独立 SELinux 强制"**。
+能做的只有"整个板子共享一份 permissive 折中 policy"，那对身份类 App 没有意义。
+要让 SELinux 成为真实的安全边界、且每实例独立，只有 VM 一条路。
+
 ## 5. 这对“对标百度云手机”和身份 App 意味着什么
 
 百度 R3588 云手机是平台侧定制的系统镜像 + 用户侧锁定，不是在公版 Armbian 上跑
@@ -291,16 +411,27 @@ redroid 再改几个属性。它的“免 root 支持 RT”说明 RT 可以进 s
 
 ## 6. 如果一定要继续，两条路
 
-### 路线 A：VM / 独立内核（能拿到真 SELinux，但重）
+### 路线 A：VM / 独立内核（唯一能拿到真 SELinux 的路，已具备硬件条件）
 
-用 QEMU/Cuttlefish/AVD 跑完整 Android，VM 自带内核和 SELinux policy，
-不依赖宿主全局 policy。代价：
+VM 有自己的内核，selinuxfs 和 policy 都是实例私有的，不碰宿主那份 —— 这是 4.8 里
+"一内核一份 policy"约束的唯一出口。**G98 这块板子本身就有条件跑**：
 
-- 每个实例内存/CPU 开销远高于容器；
-- G98 16GB 跑不了几台；
-- TEE 仍是软件模拟，身份 App 未必认。
+- `/dev/kvm` 存在（10,232），自写 C 探针实测 `KVM_GET_API_VERSION=12`、
+  `KVM_CREATE_VM`、`KVM_CREATE_VCPU` 全部成功，GICv3 就绪
+  （`/proc/interrupts` 有 vgic / kvm guest ptimer / kvm guest vtimer）；
+- 板子通过 Windows 反向代理拿到了公网，`apt-get install qemu-system-arm` 已装成功
+  （`qemu-system-arm 1:10.0.13+ds-0+deb13u1`，`/usr/bin/qemu-system-aarch64` 就位，RC=0）；
+- 资源：8 核、15.9GB 内存（可用约 9.9GB）、`/` 剩 402G；
+- 已有 AOSP13 GSI 镜像可当 guest 系统：`/root/gsi13/system.img`（1.9GB）+ `vbmeta.img`。
 
-适合“要验证 SELinux 行为”或“少量高安全实例”，不适合 6 台云手机。
+**尚未解决的是 guest 内核**：GSI 只有 system 镜像，没有可引导的内核；
+板上现成的 `/root/g98-kernel-6.1.115/Image` 是带 RK3588 板级驱动的内核，
+在 QEMU `virt` 机器上大概率起不来，需要编一个通用 arm64 内核（板上 gcc 14 可编，
+但要有 mainline 源码）。这是路线 A 下一步唯一的硬活。
+
+代价不变：每实例内存/CPU 开销远高于容器；16GB 跑不了 6 台。
+
+适合"要验证 SELinux 行为"或"少量高安全实例"，不适合 6 台云手机。
 
 ### 路线 B：自己编 Android + 撤 redroid SELinux 补丁（工作量大、风险高）
 
@@ -314,6 +445,11 @@ redroid 再改几个属性。它的“免 root 支持 RT”说明 RT 可以进 s
 其中第 2 步的 policy 层已经在测试板上验证：`secilc` 可重编，`(typepermissive kernel)`
 可让 Armbian 宿主在 `enforce=1` 下存活；第 1 步已经用 GSI13 的 stock 二进制做过
 组件级替换（见 4.6），三种组合均失败，确认必须真重编。
+
+**但即使全部编好，这条路在架构上仍然不成立**（见 4.8）：容器共享一个内核，
+一份 policy 要同时罩住 Armbian 宿主和 6 台 Android 容器，没法给每台实例独立策略。
+所以重编能换来的只是"整个板子处于名义 enforcing"，拿不到"每实例真强制"。
+**结论：路线 B 不再作为可行方案推进。**
 
 **重编需要什么（G98 这块板子做不到）**
 
