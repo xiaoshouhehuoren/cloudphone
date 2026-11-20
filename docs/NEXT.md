@@ -49,8 +49,22 @@
 - 用容器内 `secilc` 重编 policy，加 `(typepermissive kernel)`，`enforce=1` 后 SSH 与 m1–m6 均存活，`permissive=0` 计数为 0。
 - 结论：策略层可行；但容器服务仍全在 `kernel` permissive 域，`getenforce` 仍 Disabled，因为 redroid 的 libselinux/init hook 没撤。产物在 `/srv/redroid/selinux/`，实验后已 reboot 清理。
 
+## 已完成 8：组件级替换被证伪（2026-11-20）
+
+试了“不重编、直接用 AOSP13 GSI 的 stock 二进制换掉 redroid 被 hook 的组件”这条省力路，三种组合全部失败：
+
+| 组合 | 结果 |
+| --- | --- |
+| 只换 `/system/lib64/libselinux.so`（GSI stock） | 触发 `apexd` `reboot_on_failure`，容器 Exited 129，且因 privileged + CAP_SYS_BOOT **把 G98 宿主重启** |
+| 同上 + 覆盖 `apexd.rc` 去掉重启 | 不再重启，但卡在 early stage：`ro.boot.*` 全空、`/sys/fs/selinux/class` 计数 0，policy 未加载 |
+| 整块 GSI13 `/system` + stock `init`（先 detach /dev /proc /sys） | `InitFatalReboot: signal 6`：`Failed to mount required partitions early`，stock init 要求 fstab/super |
+
+对照证据：redroid 的 `selinux_android_load_policy` / `security_getenforce` 是 8 字节 `ret` stub（GSI 是 0xbc / 0xfc 字节真实实现）；redroid `libbinder.so` 有 `HACKED` 字符串；redroid `init` 被改成不走 first-stage mount。详见 `docs/locked-image.md` 4.6。
+
 ## 阻塞：容器级 SELinux enforcing（2026-11-20）
 
-- redroid 在源码里故意关闭 SELinux（维护者确认：`external/selinux`、`system/core`、`frameworks/native` 的 libselinux hook）；容器参数、bind `/proc/cmdline`、改 init 都不能打开。
-- 策略层已经验证可加载/可重编，但要让 Android 服务进入各自 domain，必须重编 libselinux/init；当前镜像做不到。
-- 宿主 Armbian 与容器共享内核 policy；测试可用 `kernel` permissive 保住宿主，但这不是生产隔离方案。生产要么 VM/独立内核，要么改 Android 宿主并定制 host policy。
+- redroid 在源码里故意关闭 SELinux（维护者确认：`external/selinux`、`system/core`、`frameworks/native` 的 libselinux hook）；容器参数、bind `/proc/cmdline`、改 init、换 stock 二进制都不能打开。
+- 策略层已经验证可加载/可重编，但要让 Android 服务进入各自 domain，必须真重编 libselinux + init + binder。
+- **这块 G98 上编不了**：aarch64 宿主，AOSP 官方不支持（`Building Android requires a x86-64 machine`）；`.repo` 只有 6.7M，源码从未 sync；板子无 default route，DNS 全失败；无 clang/ninja。
+- 下一步只能是另备 x86_64 Linux 构建机（400G+ 磁盘、AOSP 13 + redroid manifest）重编，或改走 VM/独立内核。
+- 宿主 Armbian 与容器共享内核 policy；测试可用 `kernel` permissive 保住宿主，但这不是生产隔离方案。

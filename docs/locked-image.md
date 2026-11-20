@@ -195,6 +195,87 @@ m1–m6 由 `unless-stopped` 自动拉起。产物保留在
 - 容器服务级：仍需重编 libselinux/init，当前镜像做不到；
 - 不能把 `getenforce` 改成 Enforcing 来假装，容器里它仍会显示 Disabled。
 
+### 4.6 组件级替换实验：用 GSI13 的 stock 二进制换掉 hook（2026-11-20）
+
+路线 B 先试了最省事的一条：不重编，直接把 GSI13 里**未被 patch 的 stock 二进制**
+换进 redroid 容器。
+
+**对照证据（为什么值得试）**
+
+| 文件 | redroid rt1 | GSI13 (TQ3A.230805.001.A3) |
+| --- | --- | --- |
+| `/system/lib64/libselinux.so` | 70K，sha256 `91c4c689…`；`selinux_android_load_policy` @0xea80 只有 8 字节 `mov w0,wzr; ret`，`security_getenforce` @0xc15c 同样 | 103K，sha256 `96bd1b0c…`；同函数分别 0xbc / 0xfc 字节，是真实实现 |
+| `/system/lib64/libbinder.so` | 753K，含字符串 `HACKED` | 818K，无 `HACKED` |
+| `/system/bin/init` | 2,085,760 B，sha256 `7fe2d024…`，与 `base-init`(`94836b01…`) 不同 | 2,085,472 B，sha256 `f1484207…`，无 `/proc/self/cmdline` 改写逻辑 |
+
+**实验 A：locktest9（stock libselinux + `androidboot.selinux=enforcing`）**
+
+```bash
+docker run -d --name locktest9 --privileged --network none --memory=3g \
+  -v /srv/redroid/gsi13-libselinux.so:/system/lib64/libselinux.so:ro \
+  --entrypoint /init g98/redroid-panthor-locked:0.1 \
+  qemu=1 androidboot.hardware=redroid ro.hardware.gralloc=g98 \
+  ro.hw_timeout_multiplier=10 androidboot.selinux=enforcing
+```
+
+结果：容器 0.2 秒内 `Exited (129)`，日志为空；把同一路径换回 redroid 自己的
+libselinux（`/srv/redroid/m6-libselinux.so`）后容器正常 running —— 说明是 stock
+libselinux 触发，不是挂载或 entrypoint 问题。宿主 dmesg 记录：
+
+```
+init: Service 'apexd-bootstrap' ... exited
+selinux: Unknown class property_service
+init: Unable to set property 'init.svc.apexd-bootstrap' ... SELinux permission check failed
+init: Service with 'reboot_on_failure' option failed, shutting down system.
+init: Reboot ending, jumping to kernel
+```
+
+**注意**：容器是 `--privileged`，init 持有 CAP_SYS_BOOT，这一下把 G98 宿主直接重启了
+（m1–m6 靠 `unless-stopped` 自动拉起）。后续所有这类实验必须加
+`--cap-drop SYS_BOOT`。
+
+**实验 B：lt-noreboot（把 apexd 的 reboot_on_failure 去掉）**
+
+```bash
+docker cp m6:/system/etc/init/apexd.rc /tmp/apexd.rc
+grep -v reboot_on_failure /tmp/apexd.rc > /srv/redroid/apexd-noreboot.rc   # 395 B
+```
+
+同样 stock libselinux，但额外把 `apexd.rc` 覆盖掉、cmdline 改
+`androidboot.selinux=permissive`。结果：容器不再重启，但**卡在 early stage**——
+
+- `sys.boot_completed` 空、`init.svc.zygote` 空、`getprop` 里连 `ro.boot.*` 都没有；
+- `/proc/1/cmdline` 正常带着 `second_stage` 和全部参数，说明参数进来了却没被导入成属性；
+- `/proc/1/attr/current` = `kernel`，`/sys/fs/selinux/class` 计数 **0**，即 policy 根本没加载；
+- dmesg 反复刷 `ueventd: Cannot get SELinux label on '...': No data available`、
+  `selinux: Unknown class property_service`。
+
+**实验 C：整块 stock system 当 `/system` 启动**
+
+把 `/root/gsi13/system.img`（AOSP13 GSI）loop 挂载后直接 bind 到容器 `/system`，
+entrypoint 用 stock `init`：
+
+```
+init: mount("sysfs", "/sys", "sysfs", 0, NULL) failed Device or resource busy
+init: [libfs_mgr]ReadDefaultFstab(): failed to find device default fstab
+init: Failed to create FirstStageMount failed to read default fstab for first stage mount
+init: Failed to mount required partitions early ...
+init: InitFatalReboot: signal 6
+```
+
+先用静态 wrapper `/srv/redroid/gsi-init-wrapper` 把 `/dev`、`/proc`、`/sys` detach 掉，
+前一层的 `mount sysfs failed` 消失了，但**仍然死在 first-stage mount**：stock init 要求
+fstab/super 分区。这正是 redroid `system/core/0001-fix-booting.patch` 改掉的东西
+（`FirstStageMain` 改成直接 exec `/system/bin/init second_stage`）。换句话说，
+stock 和 redroid 的用户态启动流程从第一条指令起就不兼容。
+
+（顺带确认：GSI 的 `sh`/`toybox` 不能直接当 `--entrypoint`，它们的解释器
+`/system/bin/linker64 → /apex/com.android.runtime/...` 在 init 挂载 APEX 之前不存在。）
+
+**4.6 结论**：单独换 libselinux / 换 init / 换整块 system，三种组合都跑不通。
+redroid 的 SELinux 关闭是**横跨 libselinux + init + binder 的一整套**，且 init 的
+first-stage 流程本身被改过；要撤掉它，必须重编这三个模块，即回到完整的 AOSP 构建。
+
 ## 5. 这对“对标百度云手机”和身份 App 意味着什么
 
 百度 R3588 云手机是平台侧定制的系统镜像 + 用户侧锁定，不是在公版 Armbian 上跑
@@ -231,8 +312,28 @@ redroid 再改几个属性。它的“免 root 支持 RT”说明 RT 可以进 s
 4. 回归 m1–m6、RT、相机 HAL、gralloc。
 
 其中第 2 步的 policy 层已经在测试板上验证：`secilc` 可重编，`(typepermissive kernel)`
-可让 Armbian 宿主在 `enforce=1` 下存活；真正剩下的是第 1 步（libselinux/init 重编）
-和第 3 步的 host policy 取舍。没有独立测试板之前，不建议把这套东西放到生产容器上。
+可让 Armbian 宿主在 `enforce=1` 下存活；第 1 步已经用 GSI13 的 stock 二进制做过
+组件级替换（见 4.6），三种组合均失败，确认必须真重编。
+
+**重编需要什么（G98 这块板子做不到）**
+
+| 需要 | 现状 |
+| --- | --- |
+| x86_64 Linux 构建机 | G98 是 aarch64。AOSP 官方明确不支持 aarch64 宿主：`Building Android requires a x86-64 machine`，prebuilt 工具链全是 x86-64 |
+| AOSP 13 源码 + redroid manifest | `/root/redroid-build/work/.repo` 只有 6.7M 元数据，`repo sync` 从未成功（sync.log 是 BrokenPipeError）；manifest 指向 `android.googlesource.com`（`android-13.0.0_r74`）+ redroid 自建 remote |
+| 网络 | 板子无 default route（只有 192.168.99.0/24 与 docker0），`192.168.99.1`/`.254` 都 ping 不通，DNS 解析全失败 |
+| clang/ninja | 板上只有 gcc 14.2.0；无 clang、无 ninja |
+| 磁盘 | 板上剩 402G，AOSP 13 全量 + out 约需 400G+，勉强 |
+
+结论：路线 B 的“真重编”只能在**另备一台 x86_64 Linux 机器**上做，
+产出 `external/selinux`、`system/core`、`frameworks/native` 三个模块的
+未打补丁版本（或整体 `camera.v4l2` + RT 的完整镜像），再回灌到 G98。
+
+**更省力的替代**：只重编这三个模块反而不划算——redroid 的 init 与 stock 的差异是
+结构性的（first-stage mount、fstab、apex），单换模块大概率仍然起不来；实际工作量
+接近整包编译。
+
+没有独立测试板之前，不建议把这套东西放到生产容器上。
 
 ## 7. 当前资产与清理
 
@@ -244,6 +345,9 @@ redroid 再改几个属性。它的“免 root 支持 RT”说明 RT 可以进 s
   init-wrapper.c、init-wrapper、fake_cmdline
 - SELinux 策略实验：/srv/redroid/selinux/policy-kernel-permissive.bin、
   selinux_load、selinux_load.c、extra-kernel-permissive.cil
+- 组件级替换实验：/srv/redroid/gsi13-libselinux.so、m6-libselinux.so、
+  apexd-noreboot.rc、gsi-init-wrapper（静态，detach /dev /proc /sys 后 exec stock init）
+- 只读挂载的 GSI13：`mount -o loop,ro /root/gsi13/system.img /mnt/gsi13`（实验后已 umount）
 
 清理测试容器：
 
