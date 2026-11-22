@@ -198,3 +198,12 @@
 
 - 新增 `docs/G98-知识总汇.md`：按硬件基线、运行形态演进、m7 启动/镜像、GPU、相机 HAL、riskcheck、VM 复盘、运维命令等 13 节汇总全部项目知识。
 - `docs/G98-踩坑全记录.md` 增加第十章「2026-11-21/22：VM 路线与 m7 单容器」；`docs/G98-运维手册.md` 与 `docs/HANDOFF.md` 已加当前状态提示。
+
+## 已完成：每容器独立代理（2026-11-22）
+
+- m7 出口链路：App → `172.17.0.1:18081` → 板子 `g98-proxy-relay.service`（socat）→ 板子 `127.0.0.1:18081` → 反向 SSH → Windows `192.168.99.1:18081` → 外网。
+- Windows 侧 `tools/g98-proxy.py` 每容器一个端口（m7=18081）；控制 API `127.0.0.1:18080`；日志 `tools/g98-proxy.log`。Docker NAT 会 SNAT 成板子地址，**容器身份必须用端口区分**。
+- 板子侧 `/srv/redroid/container-proxy.sh` 自动设置默认路由和 Android 全局代理；`m7-start.sh` 调用它，`m7-watch.sh` 每 60 秒自愈。
+- 实测：m7 重启后自动恢复；浦发 8.2.7 进入 `MainActivity` 并加载首页，登录页可到（截图 `screenshots/spdb-relay.png`）。
+- 限制：Windows 防火墙挡板子入站，必须靠反向 SSH；当前机器非管理员，Startup 注册需手工运行 `tools/g98-proxy-register.ps1`，否则 Windows 重启/会话结束后代理和隧道会失效。
+- 详见 `docs/container-proxy.md`。
