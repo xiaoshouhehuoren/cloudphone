@@ -6,6 +6,22 @@
     "m7": {
       "port": 18081,
       "enabled": true
+    },
+    "wx1": {
+      "port": 18082,
+      "enabled": true
+    },
+    "wx2": {
+      "port": 18083,
+      "enabled": true
+    },
+    "wx3": {
+      "port": 18084,
+      "enabled": true
+    },
+    "wx4": {
+      "port": 18085,
+      "enabled": true
     }
   }
 }

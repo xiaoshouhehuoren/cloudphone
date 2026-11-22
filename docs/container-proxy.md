@@ -1,6 +1,7 @@
 # 每容器独立代理（m7 当前方案）
 
-> 2026-11-22：m7 已通过独立代理出口访问互联网，浦发 App 8.2.7 能进入首页/登录页。
+> 2026-11-22：m7 已通过独立代理出口访问互联网，浦发 App 8.2.7 能进入首页/登录页；
+> wx1–wx4 四台纯微信容器也已各自分配独立端口。
 > 每个容器一个代理端口；不要用源 IP 区分容器，Docker NAT 会把容器流量 SNAT 成板子地址。
 
 ## 1. 拓扑
@@ -37,17 +38,18 @@ Windows g98-proxy.py（每容器独立端口）
 | 位置 | 文件/服务 | 作用 |
 |---|---|---|
 | Windows | `cloudphone/tools/g98-proxy.py` | HTTP/HTTPS CONNECT 代理管理器，每容器一个监听端口 |
-| Windows | `cloudphone/tools/g98-proxy.json` | 容器→端口配置，当前 `m7:18081` |
+| Windows | `cloudphone/tools/g98-proxy.json` | 容器→端口配置，当前 m7:18081、wx1–wx4:18082–18085 |
 | Windows | `cloudphone/tools/g98-proxy-supervisor.py` | 常驻拉起代理，异常退出后 5 秒重试 |
 | Windows | `cloudphone/tools/g98-proxyctl.py` | 运维 CLI：status/add/remove/check/reload |
-| Windows | `_tunnel.cmd` | 循环执行 `ssh -R 18081:192.168.99.1:18081`（含 askpass 环境） |
+| Windows | `_tunnel.cmd` | 循环执行 `ssh -R 18081..18085:192.168.99.1:18081..18085`（含 askpass 环境） |
 | Windows | `cloudphone/tools/G98Proxy.vbs` | 隐藏启动 supervisor + `_tunnel.cmd`；可放 Startup |
 | 板子 | `/srv/redroid/container-proxy.sh` | 给容器加默认路由、设置 Android 全局代理、校验 TCP |
-| 板子 | `/srv/redroid/proxies.conf` | 每容器端口表，当前 `m7 18081` |
+| 板子 | `/srv/redroid/proxies.conf` | 每容器端口表：m7 18081、wx1 18082、wx2 18083、wx3 18084、wx4 18085 |
 | 板子 | `/srv/redroid/apply-proxies.sh` | 按 conf 批量重放 |
-| 板子 | `g98-proxy-relay.service` | socat: `172.17.0.1:18081 -> 127.0.0.1:18081` |
+| 板子 | `g98-proxy-relay@.service` | 模板：`socat TCP-LISTEN:%i,bind=172.17.0.1 -> 127.0.0.1:%i`；18081–18085 五个实例 |
 | 板子 | `m7-start.sh` | 启动 m7 后调用 `container-proxy.sh m7 18081 172.17.0.1` |
-| 板子 | `m7-watch.sh` | 每 60 秒检查默认路由/全局代理，缺失时修复 |
+| 板子 | `m7-watch.sh` | 每 60 秒检查 m7 默认路由/全局代理，缺失时修复 |
+| 板子 | `wx-start.sh` | 启动 wxN 后调用 `container-proxy.sh wxN 1808N 172.17.0.1` |
 
 代理控制 API 只绑 `127.0.0.1:18080`，不对外；代理监听绑 `192.168.99.1:端口`。
 
@@ -59,7 +61,11 @@ Windows g98-proxy.py（每容器独立端口）
   "control_host": "127.0.0.1",
   "control_port": 18080,
   "containers": {
-    "m7": { "port": 18081, "enabled": true }
+    "m7":  { "port": 18081, "enabled": true },
+    "wx1": { "port": 18082, "enabled": true },
+    "wx2": { "port": 18083, "enabled": true },
+    "wx3": { "port": 18084, "enabled": true },
+    "wx4": { "port": 18085, "enabled": true }
   }
 }
 ```
@@ -74,6 +80,8 @@ ip route
 settings get global http_proxy
 # 172.17.0.1:18081
 ```
+
+wx1–wx4 同理，`http_proxy` 分别为 `172.17.0.1:18082`–`18085`。
 
 ## 4. 启动与自启
 
@@ -120,18 +128,19 @@ m7 由 `g98-m7.service` 启动，启动脚本已自动调用 `container-proxy.sh
 
 ## 5. 新增容器
 
-假设新容器叫 `m8`，分配端口 18082：
+假设新容器叫 `m8`，分配端口 18086：
 
 ```powershell
 # Windows
-python cloudphone/tools/g98-proxyctl.py add m8 18082
+python cloudphone/tools/g98-proxyctl.py add m8 18086
 python cloudphone/tools/g98-proxyctl.py check m8
 ```
 
 ```bash
 # 板子
-echo 'm8 18082' >> /srv/redroid/proxies.conf
-/srv/redroid/container-proxy.sh m8 18082 172.17.0.1
+echo 'm8 18086' >> /srv/redroid/proxies.conf
+/srv/redroid/container-proxy.sh m8 18086 172.17.0.1
+systemctl enable --now g98-proxy-relay@18086.service
 # 新容器的启动脚本里加同一行；m8-watch 也可以照抄 m7-watch 的修复逻辑
 ```
 
@@ -148,6 +157,7 @@ echo 'm8 18082' >> /srv/redroid/proxies.conf
 ```powershell
 python cloudphone/tools/g98-proxyctl.py status
 python cloudphone/tools/g98-proxyctl.py check m7
+python cloudphone/tools/g98-proxyctl.py check wx1
 ```
 
 ```bash
@@ -171,7 +181,10 @@ docker exec m7 dumpsys window | grep mCurrentFocus
   当前机器没有管理员权限，无法注册 Windows 服务，只能用当前用户 Startup。
 - 反向 SSH 只绑定板子 127.0.0.1；必须靠 `g98-proxy-relay.service` 暴露到 docker0。
 - Android 全局代理只覆盖遵守 `ProxySelector` 的请求；native 直连/自建网络栈可能绕过。
-  m7 的 DXRisk 仍打印 `getResponseCode:-1`，但主页面/登录页已可用。
+  m7 的 DXRisk 仍打印 `getResponseCode:-1`，但主页面/登录页已可用；CTID 目前会提示
+  「设备存在安全风险」→「网络不可用」，属于 native 直连/环境检测，尚未接透明代理。
+- 多个容器共用同一个 Windows 上游时，公网出口 IP 相同；端口只区分容器身份。
+  要一容器一公网 IP，需要给 `g98-proxy.py` 增加 `upstream`（住宅代理/VPS/4G）。
 - 代理端口不要暴露到公网；当前只绑 `192.168.99.1`（Windows 内网）和
   `172.17.0.1`（docker0）。
 - 若 Windows 防火墙策略变化导致直连被挡，反向 SSH 方案仍可用；若 SSH 到板子也不通，
