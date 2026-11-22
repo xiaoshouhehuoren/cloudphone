@@ -193,3 +193,8 @@
 - 启动：`/srv/redroid/m7-start.sh` + `g98-m7.service`（oneshot），看门狗 `g98-m7-watch.timer`（60s）；相机源为宿主 ffmpeg 写 `/dev/video14/15`（640x480 YUV420P）。
 - 局限：SELinux/root 为进程级 bind mount 伪装，不等于真机 TEE/AVB；stock AOSP Camera2 未打通；HAL 仅单流 640x480。
 - 详见 `docs/m7-container.md`。
+
+## 已完成：知识总汇（2026-11-22）
+
+- 新增 `docs/G98-知识总汇.md`：按硬件基线、运行形态演进、m7 启动/镜像、GPU、相机 HAL、riskcheck、VM 复盘、运维命令等 13 节汇总全部项目知识。
+- `docs/G98-踩坑全记录.md` 增加第十章「2026-11-21/22：VM 路线与 m7 单容器」；`docs/G98-运维手册.md` 与 `docs/HANDOFF.md` 已加当前状态提示。
