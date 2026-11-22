@@ -60,7 +60,11 @@ def main():
         sys.exit('dulwich missing: run with PYTHONPATH=vendor (see docs/G98-踩坑全记录.md)')
     url = 'https://x-access-token:%s@github.com/%s/%s.git' % (token, ORG, REPO)
     print('pushing...')
-    porcelain.push('.', url, 'refs/heads/master:refs/heads/master')
+    # dulwich prints the remote URL, which contains the token; keep it out of logs.
+    import contextlib, io
+    _sink = io.StringIO()
+    with contextlib.redirect_stdout(_sink):
+        porcelain.push('.', url, 'refs/heads/master:refs/heads/master')
     print('done: https://github.com/%s/%s' % (ORG, REPO))
 
 
