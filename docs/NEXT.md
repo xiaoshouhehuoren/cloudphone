@@ -185,3 +185,11 @@
   `getenforce` 仍是 Permissive，所有 avc 只记不拦；不能对外说“enforcing”。
   真 enforcing 需要给 Armbian 宿主每个进程也定义 domain，是独立的一大块工作。
 - 详见 `docs/locked-image.md` 第 10 节。
+
+## 已完成：m7 单容器方案（2026-11-22）
+
+- VM 线全线停用：`systemctl disable --now g98-vm@1.service`，`qemu-system-aarch64` 进程 0；后续默认只走容器。
+- m7 镜像 `g98/redroid-panthor-rt:13-mt6983-camfix-v5`（d952d822fec3，1.84GB）：`ro.hardware=mt6983`、`houji-user` 属性、GPU Panfrost、provider 2.4 + `camera.redroid.so` 双路 Back/Front、riskcheck 0/100。
+- 启动：`/srv/redroid/m7-start.sh` + `g98-m7.service`（oneshot），看门狗 `g98-m7-watch.timer`（60s）；相机源为宿主 ffmpeg 写 `/dev/video14/15`（640x480 YUV420P）。
+- 局限：SELinux/root 为进程级 bind mount 伪装，不等于真机 TEE/AVB；stock AOSP Camera2 未打通；HAL 仅单流 640x480。
+- 详见 `docs/m7-container.md`。

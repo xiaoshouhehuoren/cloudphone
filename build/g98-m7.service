@@ -1,0 +1,14 @@
+[Unit]
+Description=G98 redroid m7 (mt6983 props + camera + riskcheck mask)
+After=docker.service camstream.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/srv/redroid/m7-start.sh
+ExecStop=/usr/bin/docker rm -f m7
+TimeoutStartSec=420
+
+[Install]
+WantedBy=multi-user.target

@@ -40,7 +40,7 @@ const int32_t kV4L2SensitivityDenominator = 1000;
 // Generously allow up to 6MB (the largest size on the RPi Camera is about 5MB).
 const size_t kV4L2MaxJpegSize = 6000000;
 
-int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device,
+int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
                     std::unique_ptr<Metadata>* result) {
   HAL_LOG_ENTER();
 
@@ -329,10 +329,11 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device,
       NoEffectMenuControl<float>(ANDROID_LENS_APERTURE,
                                  ANDROID_LENS_INFO_AVAILABLE_APERTURES,
                                  {2.0}));  // RPi camera v2 is f/2.0.
-  // Always assume external-facing.
+  // Camera 0 is back-facing, camera 1 is front-facing.
   components.insert(
       std::unique_ptr<PartialMetadataInterface>(new Property<uint8_t>(
-          ANDROID_LENS_FACING, ANDROID_LENS_FACING_EXTERNAL)));
+          ANDROID_LENS_FACING,
+          id == 0 ? ANDROID_LENS_FACING_BACK : ANDROID_LENS_FACING_FRONT)));
   components.insert(
       NoEffectMenuControl<float>(ANDROID_LENS_FOCAL_LENGTH,
                                  ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS,

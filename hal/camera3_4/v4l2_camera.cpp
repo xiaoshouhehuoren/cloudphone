@@ -47,7 +47,7 @@ V4L2Camera* V4L2Camera::NewV4L2Camera(int id, const std::string path) {
   }
 
   std::unique_ptr<Metadata> metadata;
-  int res = GetV4L2Metadata(v4l2_wrapper, &metadata);
+  int res = GetV4L2Metadata(v4l2_wrapper, id, &metadata);
   if (res) {
     HAL_LOGE("Failed to initialize V4L2 metadata: %d", res);
     return nullptr;

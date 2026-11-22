@@ -3,6 +3,8 @@
 把一块 BDY G98 开发板（RK3588 / 15GB / Armbian 6.18 / Docker）做成 **6 台 Android 13 云手机**，
 并给它接上**可用的虚拟摄像头**（Camera2 预览 + 拍照）、微信、以及把宿主机任意画面灌进相机的通路。
 
+> **2026-11-22 当前交付：** VM 线已停用，只保留 **m7 单容器**（镜像 v5）。GPU 硬渲、双路相机、真机属性、riskcheck 0/100 已实测。详见 [`docs/m7-container.md`](docs/m7-container.md)。
+
 ## 内容
 
 | 目录 | 说明 |
@@ -15,7 +17,10 @@
 | `rt/` | fake lmkd、Agent enrollment、mock Channel、librt/runtime 构建脚本 |
 | `hal/arc/` | 自写 libyuv shim、JPEG 编码器（jo_jpeg）、arc/ 源 |
 | `hal/camera3_4/` | 改过的 AOSP camera HAL 3.4 源码（V4L2 wrapper、元数据、多流） |
+| `docs/m7-container.md` | **当前方案**：m7 单容器（属性/相机/GPU/riskcheck）说明与验证命令 |
 | `build/_rehal7.sh` | 用 NDK 交叉编译 `camera.redroid.so`（Linux/Windows MSYS 均可） |
+| `build/m7-start.sh` | 启动 m7 容器、相机源、属性与风控伪装 |
+| `build/m7-watch.sh` | m7 容器看门狗脚本 |
 | `build/cam-rollout.sh` | 把相机栈热插拔到任意容器（m1–m6） |
 | `tools/raw2v4l2.py` | 宿主机侧：TCP 原始帧 → `/dev/video10` |
 | `tools/_stream.ps1` | Windows 侧：GDI 实时抓屏 → TCP（15 fps） |

@@ -1,0 +1,10 @@
+[Unit]
+Description=Check G98 m7 container every minute
+
+[Timer]
+OnBootSec=180
+OnUnitActiveSec=60
+Unit=g98-m7-watch.service
+
+[Install]
+WantedBy=timers.target

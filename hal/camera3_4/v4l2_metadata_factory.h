@@ -26,7 +26,7 @@ namespace v4l2_camera_hal {
 
 // A static function to get a Metadata object populated with V4L2 or other
 // controls as appropriate.
-int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device,
+int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
                     std::unique_ptr<Metadata>* result);
 
 }  // namespace v4l2_camera_hal

@@ -1,0 +1,7 @@
+[Unit]
+Description=G98 m7 container watchdog
+After=docker.service g98-m7.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/redroid/m7-watch.sh
