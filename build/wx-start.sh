@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-N=${1:?usage: wx-start.sh <1-4>}
+N=${1:?usage: wx-start.sh <1-6>}
 C=wx$N
 CONF=/srv/redroid/wx-identities.conf
 IMG=g98/redroid-panthor-rt:13-mt6983-camfix-v5
@@ -26,7 +26,7 @@ done
 [ "$B" = "1" ] || { echo "$C boot timeout" >&2; exit 1; }
 if ! docker exec "$C" pm path com.tencent.mm >/dev/null 2>&1; then
   docker exec "$C" mkdir -p /data/local/tmp
-  docker cp /srv/redroid/apk/wechat860.apk "$C:/data/local/tmp/wechat.apk"
+  docker cp /srv/redroid/apk/wechat879.apk "$C:/data/local/tmp/wechat.apk"
   docker exec "$C" pm install -r -g /data/local/tmp/wechat.apk >/dev/null
 fi
 /srv/redroid/container-proxy.sh "$C" "$P" 172.17.0.1 || echo "WARN: proxy setup failed" >&2

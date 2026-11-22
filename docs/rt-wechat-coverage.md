@@ -42,7 +42,7 @@ ROM README 写明：当前目标是 OnePlus 9 Android 14 **user** 构建、SELin
 | 1 | 设备与 root | 可改系统分区、可调试、无 SELinux 阻碍 | redroid Android 13：`ro.debuggable=1`、`ro.secure=1`、**SELinux Disabled**、`/system/xbin/su`，Docker 容器 root | ✅ 覆盖 |
 | 2 | 系统镜像可控 | 预装系统 APK / native 库 / 改 framework | 已有 docker commit 流水线（cam9→cam15），/vendor 已验证可改，/system 同理可写 | ✅ 覆盖 |
 | 3 | 预装 Probe / Agent | /product/app 或 /system/priv-app，平台签名 | 源码齐全，可编译；签名需换成我们自己的 key（见 #8） | ✅ 覆盖 |
-| 4 | 精确微信版本 | Probe 钉死：8.0.66/2980、8.0.79/3200、8.0.80/3200 | m6 现装 **8.0.80 / versionCode 3220**，差 20，不在支持列表 | ⚠️ 需换 APK |
+| 4 | 精确微信版本 | Probe 钉死：8.0.66/2980、8.0.79/3200、8.0.80/3200 | wx1–wx4 已换 **8.0.79 / versionCode 3200**，匹配；旧 m6 的 8.0.80/3220 不在列表 | ✅ 覆盖 |
 | 5 | RT native 库 | libsalespartner_rt.so + LSPlant + ARM64 trampoline | 仓库只有源码，没有针对 Android 13/redroid 的产物；需自己编 | ❌ 缺 |
 | 6 | Zygote/app_process 注入 | 在 app_process 启动路径 dlopen RT 库 | redroid 预构建镜像，无源码构建链；需 patch app_process/libandroid_runtime 或等价方案 | ❌ 缺 |
 | 7 | framework 注入点 | ActivityThread 在 Application.attach() 后调 SalesPartnerHookRuntime | redroid framework.jar 为预构建；需 smali 补丁或重建 framework | ❌ 缺 |
@@ -60,7 +60,7 @@ ROM README 写明：当前目标是 OnePlus 9 Android 14 **user** 构建、SELin
 
 - 6 台 redroid Android 13 容器（m1–m6），Docker + systemd，ADB 端口 5555–5560；
 - 自研相机 HAL（Camera2 预览 + JPEG 拍照）、外部画面注入；
-- 微信 8.0.80 已装、可启动；
+- 微信 8.0.79/3200 已装、可启动（wx1–wx4）；8.0.80/3220 不在 Probe 支持列表。
 - **adb over bridge IP** 控制通道：`uiautomator dump` / `screencap` / `input tap/text` 全部可用；
 - 代理工具（win_http_proxy）让容器访问外网。
 

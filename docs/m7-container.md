@@ -1,5 +1,8 @@
 # m7 单容器方案（2026-11-22）
 
+> **2026-11-23 状态：** m7 已 `systemctl disable --now`，容器已删除；本文保留为 m7 方案记录。
+> 当前生产负载为 wx1–wx4 纯微信容器（8.0.79/3200），见 `docs/wx-containers.md`。
+
 ## 结论
 
 当前板子只保留 **m7 一台 redroid 容器**，不再运行 QEMU 虚拟机。VM 线已执行 `systemctl disable --now g98-vm@1.service`，`qemu-system-aarch64` 进程数为 0；之前 vm1/vm2/vm3 的属性补丁保留在 qcow2 里，但默认不启动，需要时再按 `docs/` 里的 VM 记录恢复。

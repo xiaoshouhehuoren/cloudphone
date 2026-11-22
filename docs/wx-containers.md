@@ -3,6 +3,8 @@
 > 2026-11-22：在 m7 之外新增 4 台只跑微信的 Android 13 容器。每台独立 `/data`、独立
 > serial / MAC / Android ID、独立代理端口；镜像复用 m7 的 `13-mt6983-camfix-v5`。
 > 这 4 台不挂相机，不启 riskcheck 伪装，只保留真机属性与代理。
+>
+> **2026-11-23 更新：** m7 已停用；wx1–wx4 已切到微信 **8.0.79 / versionCode 3200**（RT Probe 钉死版本），4 台运行中。
 
 ## 1. 规格
 
@@ -15,7 +17,7 @@
 | 设备 | 仅 `/dev/dri`；无 `/dev/video*` |
 | 网络 | bridge；无 published ports；默认路由 `172.17.0.1` |
 | 代理 | wx1 18082 / wx2 18083 / wx3 18084 / wx4 18085 |
-| 应用 | `com.tencent.mm` 8.0.80（versionCode 3220，targetSdk 34） |
+| 应用 | `com.tencent.mm` 8.0.79（versionCode 3200，targetSdk 34） |
 
 ## 2. 身份
 
@@ -56,7 +58,7 @@ systemd stop 超时和 start/stop 竞态；数据在 bind mount 里，删容器�
 1. 读 `wx-identities.conf` 取 serial / MAC / proxy；
 2. 容器不存在则 `docker run`，存在但停止则 `docker start`，start 失败则删掉重建；
 3. 轮询 `sys.boot_completed=1`（最多 180 秒）；
-4. 没装微信则 `pm install -r -g wechat860.apk`；
+4. 没装微信则 `pm install -r -g wechat879.apk`（8.0.79 / 3200）；
 5. 调 `container-proxy.sh wxN <port> 172.17.0.1`；
 6. 设 `device_name=WXN`、关闭 `adb_enabled`、启动微信 LauncherUI。
 
@@ -101,7 +103,8 @@ Windows 侧查看分流日志：`cloudphone/tools/g98-proxy.log`，每个请求�
   native 直连/自建网络栈可能绕过。微信目前能到登录页，代理日志有
   `weixin.qq.com:443`；若后续某个功能提示网络异常，需要上 redsocks/iptables
   做容器级透明代理。
-- **内存**：4 台微信 + m7 约占 13GiB/15GiB；再开第 5 台微信前应先停 m7 或加内存。
+- **内存**：m7 已停用，4 台微信约占 5GiB；当前 `available` 约 4.9GiB。第 5 台可起，第 6 台接近上限。
 - **无相机**：wx1–wx4 没有 `/dev/video*`，Camera2 会报 0 路；这是纯微信容器的预期行为。
-- **微信版本**：当前 8.0.80；升级 APK 只需替换 `/srv/redroid/apk/wechat860.apk`
-  并删除对应容器后重启服务（或手动 `pm install -r`）。
+- **微信版本**：当前 8.0.79/3200；APK 为 `/srv/redroid/apk/wechat879.apk`。
+  8.0.80/3220 不在 RT Probe 支持列表；只有 8.0.80/3200 才是支持版本。升级 APK 时替换该文件，
+  删除对应容器后重启服务（或手动 `pm install`）。

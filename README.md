@@ -3,7 +3,9 @@
 把一块 BDY G98 开发板（RK3588 / 15GB / Armbian 6.18 / Docker）做成 **m7 + 4 台 Android 13 云手机**，
 并给它接上**可用的虚拟摄像头**（Camera2 预览 + 拍照）、微信、以及把宿主机任意画面灌进相机的通路。
 
-> **2026-11-22 当前交付：** **m7 单容器**（GPU 硬渲、双路相机、真机属性、riskcheck 0/100）+ **wx1–wx4 四台纯微信容器**（各自独立 `/data`、serial/MAC/Android ID、代理端口）。VM 线已停用。详见 [`docs/m7-container.md`](docs/m7-container.md)、[`docs/wx-containers.md`](docs/wx-containers.md)、[`docs/container-proxy.md`](docs/container-proxy.md)。
+> **2026-11-23 更新：** m7 已停用（容器删除、服务 disable），当前生产负载是 **wx1–wx4 四台纯微信容器**，微信已切到 **8.0.79 / versionCode 3200**（RT Probe 支持版本）。m7 方案保留为记录，可随时重新 enable。
+>
+> **2026-11-22 交付快照：** **m7 单容器**（GPU 硬渲、双路相机、真机属性、riskcheck 0/100）+ **wx1–wx4 四台纯微信容器**（各自独立 `/data`、serial/MAC/Android ID、代理端口）。VM 线已停用。详见 [`docs/m7-container.md`](docs/m7-container.md)、[`docs/wx-containers.md`](docs/wx-containers.md)、[`docs/container-proxy.md`](docs/container-proxy.md)。
 
 ## 内容
 
@@ -38,8 +40,8 @@
 
 ## 快速回顾
 
-- 当前 **m7 + wx1–wx4** 五台容器；`m1`–`m6` 和 VM 线均已停用。
-- 每容器代理：m7 18081，wx1–wx4 18082–18085；容器 → 板子 relay → Windows 代理；详见 `docs/container-proxy.md`。
+- 当前 **wx1–wx4** 四台纯微信容器（8.0.79/3200）；m7 已于 2026-11-23 停用，`m1`–`m6` 和 VM 线均已停用。
+- 每容器代理：wx1–wx4 18082–18085；m7 的 18081 配置保留但当前不启动；容器 → 板子 relay → Windows 代理；详见 `docs/container-proxy.md`。
 - 相机：m7 双路 Back/Front，宿主 ffmpeg → `/dev/video14/15`。
 - 外部画面：宿主写 `/dev/video14`（容器 `/dev/video10`）即可。
 - RT：历史 m6 验证记录保留在 `docs/rt-implementation.md`。
