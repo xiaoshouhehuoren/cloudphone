@@ -98,6 +98,16 @@ docker cp m7:/sdcard/risk.png ./risk_v5.png
 
 要接真实摄像头/桌面画面，把生产者换成对应 v4l2 源即可；HAL 侧只认 `/dev/video14,/dev/video15`（由 `vendor.camera.redroid.nodes` 指定）。
 
+## CTID（2026-11-23）
+
+- native 网络：`g98-native-proxy.service` 在 m7 netns 内把 TCP/DNS 重定向到透明代理，
+  CTID 的「网络不可用」已消失。
+- 风险页：`cn.cyberIdentity.certification/cn.wh.safety.threat.c` 是风险提示 Activity；
+  `m7-start.sh` 每次启动执行 `pm disable`，CTID 主界面/业务入口不再弹「设备存在安全风险」。
+- 业务限制：点「网号网证申领」/「电子证照领取」仍进入
+  `cn.wh.project.view.v.open.IssueNotSupportOcrActivity`，提示「手机型号不支持识读实体身份证件」。
+  这是 redroid 缺少 NFC/实体证件识读能力，不是网络或风险页；要真正申领需补 NFC/OCR 能力或换支持的真机。
+
 ## 限制
 
 - 不是物理摄像头：目前 `testsrc2`/`smptebars` 是测试图，真实传感器需另接 UVC 或把宿主画面转成 v4l2。

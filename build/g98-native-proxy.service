@@ -1,0 +1,11 @@
+[Unit]
+Description=G98 native proxy for m7
+After=docker.service
+Requires=docker.service
+[Service]
+Type=simple
+ExecStart=/srv/redroid/native-proxy.sh m7 19000 19053 18081
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

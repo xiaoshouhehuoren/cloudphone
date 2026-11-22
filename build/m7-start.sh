@@ -17,6 +17,9 @@ for i in $(seq 1 60); do B=$(docker exec $C getprop sys.boot_completed 2>/dev/nu
 [ "$B" = "1" ] || { echo "boot timeout"; exit 1; }
 # per-container proxy: default route + Android global proxy
 /srv/redroid/container-proxy.sh "$C" 18081 172.17.0.1 || echo "WARN: proxy setup failed"
+# native proxy: transparent TCP/DNS redirect inside the container netns
+systemctl restart g98-native-proxy.service || echo "WARN: native proxy restart failed"
+sleep 2
 # restart the host-side raw YUV producers for camera nodes 14/15
 for N in 14 15; do
   P=/srv/redroid/cam${N}.pid
@@ -31,6 +34,8 @@ docker exec $C sh -c 'chmod 666 /dev/video10 /dev/video11 /dev/video14 /dev/vide
 docker cp /srv/redroid/risk-watch.sh $C:/data/local/tmp/risk-watch.sh
 docker exec $C chmod 755 /data/local/tmp/risk-watch.sh
 docker exec $C settings put global adb_enabled 0
+# CTID risk warning activity: keep it disabled so the app's risk page cannot block
+docker exec $C pm disable cn.cyberIdentity.certification/cn.wh.safety.threat.c 2>/dev/null || true
 docker exec $C setprop vendor.camera.redroid.nodes /dev/video14,/dev/video15
 docker exec $C setprop ctl.stop vendor.camera-provider-2-7-ext || true
 docker exec $C setprop ctl.stop cameraserver || true
