@@ -83,9 +83,12 @@ settings get global http_proxy
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File cloudphone/tools/g98-proxy-register.ps1
+# 代理/隧道已经在跑，只想安装自启：加 -NoStart
+powershell -ExecutionPolicy Bypass -File cloudphone/tools/g98-proxy-register.ps1 -NoStart
 ```
 
-它会把 `G98Proxy.vbs` 复制到当前用户 Startup，并立即启动代理和隧道。
+它会把 `G98Proxy.vbs` 复制到当前用户 Startup，并立即启动代理和隧道；
+加 `-NoStart` 时只安装，不重复启动。
 DSH 的 workspace-write 沙箱不允许写工作区外，所以在本 agent 里执行会被
 `POLICY_DENIED`；这一步需要用户手工运行，或给 DSH 一次 danger-full-access。
 
@@ -93,7 +96,7 @@ DSH 的 workspace-write 沙箱不允许写工作区外，所以在本 agent 里�
 
 1. 把 `cloudphone/tools/G98Proxy.vbs` 复制到
    `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`。
-2. 双击一次 `G98Proxy.vbs`。
+2. 下次登录会自动启动；也可以双击一次 `G98Proxy.vbs` 立即启动。
 
 如果只想临时启动：
 
