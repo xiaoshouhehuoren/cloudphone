@@ -1,0 +1,11 @@
+{
+  "bind_host": "192.168.99.1",
+  "control_host": "127.0.0.1",
+  "control_port": 18080,
+  "containers": {
+    "m7": {
+      "port": 18081,
+      "enabled": true
+    }
+  }
+}

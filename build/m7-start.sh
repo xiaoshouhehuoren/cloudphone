@@ -15,6 +15,8 @@ docker run -d --name $C --privileged --security-opt label=disable --cap-add SYS_
  ro.build.fingerprint=Xiaomi/houji/houji:13/TKQ1.221114.001/V14.0.9.0.TMCCNXM:user/release-keys >/dev/null
 for i in $(seq 1 60); do B=$(docker exec $C getprop sys.boot_completed 2>/dev/null | tr -d '\r'); [ "$B" = "1" ] && break; sleep 3; done
 [ "$B" = "1" ] || { echo "boot timeout"; exit 1; }
+# per-container proxy: default route + Android global proxy
+/srv/redroid/container-proxy.sh "$C" 18081 172.17.0.1 || echo "WARN: proxy setup failed"
 # restart the host-side raw YUV producers for camera nodes 14/15
 for N in 14 15; do
   P=/srv/redroid/cam${N}.pid

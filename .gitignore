@@ -12,3 +12,6 @@ linklibs/
 dl_libs/
 *.tar
 *.zip
+__pycache__/
+*.pyc
+*.lock
