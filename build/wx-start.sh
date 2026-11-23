@@ -3,7 +3,7 @@ set -euo pipefail
 N=${1:?usage: wx-start.sh <1-6>}
 C=wx$N
 CONF=/srv/redroid/wx-identities.conf
-IMG=g98/redroid-panthor-rt:13-mt6983-camfix-v5
+IMG=g98/redroid-panthor-rt:13-fuxi-v3
 read -r S M P A < <(awk -v c="$C" '$1==c {print $2, $3, $4, $5}' "$CONF")
 [ -n "${S:-}" ] && [ -n "${A:-}" ] || { echo "no identity for $C" >&2; exit 1; }
 # Common profile: Xiaomi 13/fuxi + 1080x2400/440dpi/30fps.

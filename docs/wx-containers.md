@@ -12,7 +12,7 @@
 
 | 项 | 值 |
 |---|---|
-| 镜像 | `g98/redroid-panthor-rt:13-mt6983-camfix-v5`（`d952d822fec3`，1.84GB） |
+| 镜像 | `g98/redroid-panthor-rt:13-fuxi-v3`（`823625b504d8`，1.84GB；底层 product/fingerprint 已改 fuxi） |
 | 容器 | `wx1`–`wx5` |
 | Android | 13；五台均 `fuxi-user`（Xiaomi 13）；`ro.hardware=mt6983` |
 | 数据 | `/srv/redroid/wx1`–`/srv/redroid/wx5` |
@@ -35,7 +35,7 @@
 | wx5 | `G98WX5B7D2E1` | `02:5a:5b:5c:5d:5e` | `5a5b5c5d5e5f6071` | 18086 |
 
 > **统一显示 profile（2026-11-23）：** 五台均 Xiaomi 13（`fuxi` / `2211133C`）+ `1080x2400 @ 440dpi / 30fps`。wx5 先改，随后 wx1–wx4 依次重建；数据 `/srv/redroid/wxN` 均保留，删容器重建不丢。
-> 底层 `ro.hardware` / `ro.boot.hardware` 仍是红roid 的 `mt6983`，不是真机 Xiaomi 13 的 qcom；这是镜像底层，不能完全等同真机。
+> **底层属性（2026-11-23）：** v3 镜像已把 system/vendor/odm/product/system_ext/vendor_dlkm 的 `ro.product.*` 和分区 fingerprint 全部改成 Xiaomi/fuxi/2211133C；`ro.board.platform=kalama`。`ro.hardware` / `ro.boot.hardware` 仍保留实际 `mt6983`：把两者改成 `qcom` 的测试镜像会让 SurfaceFlinger/HWC 反复崩溃，无法开机，因此这是硬限制。
 
 Android ID 由 `wx-start.sh` 在 boot 完成后执行 `settings put secure android_id` 写入；
 即使删容器重建也会回到表里的值。不要清 `/srv/redroid/wxN`（应用数据仍会丢）。
