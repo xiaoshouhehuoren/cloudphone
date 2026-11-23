@@ -45,7 +45,7 @@ def cmd_add(args):
         payload["auth"] = args.auth
     print(json.dumps(call("/add", payload), ensure_ascii=False))
     print("board: echo '%s %s' >> /srv/redroid/proxies.conf" % (args.name, args.port))
-    print("board: /srv/redroid/container-proxy.sh %s %s 192.168.99.1" % (
+    print("board: /srv/redroid/container-proxy.sh %s %s 192.168.5.115" % (
         args.name, args.port))
 
 
@@ -54,7 +54,7 @@ def cmd_remove(args):
 
 
 def cmd_reload(_args):
-    print(json.dumps(call("/reload"), ensure_ascii=False))
+    print(json.dumps(call("/reload", {}), ensure_ascii=False))
 
 
 def cmd_check(args):
@@ -63,7 +63,7 @@ def cmd_check(args):
     if not spec:
         print("unknown container: %s" % args.name, file=sys.stderr)
         raise SystemExit(2)
-    proxy = "http://192.168.99.1:%s" % spec["port"]
+    proxy = "http://%s:%s" % (data.get("bind_host"), spec["port"])
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
     try:

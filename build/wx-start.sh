@@ -6,9 +6,20 @@ CONF=/srv/redroid/wx-identities.conf
 IMG=g98/redroid-panthor-rt:13-mt6983-camfix-v5
 read -r S M P A < <(awk -v c="$C" '$1==c {print $2, $3, $4, $5}' "$CONF")
 [ -n "${S:-}" ] && [ -n "${A:-}" ] || { echo "no identity for $C" >&2; exit 1; }
+# Common profile: Xiaomi 13/fuxi + 1080x2400/440dpi/30fps.
+W=1080; H=2400; DPI=440; FPS=30
+MODEL=2211133C; DEVICE=fuxi; NAME=fuxi; FLAVOR=fuxi-user
+FP=Xiaomi/fuxi/fuxi:13/TKQ1.221114.001/V14.0.9.0.TMCCNXM:user/release-keys
 create() {
   mkdir -p "/srv/redroid/$C"
-  docker run -d --name "$C" --hostname "$C" --privileged --security-opt label=disable --cap-add SYS_NICE --entrypoint /init --mac-address "$M" -v "/srv/redroid/$C:/data" --device /dev/dri "$IMG" qemu=1 androidboot.hardware=mt6983 androidboot.verifiedbootstate=green androidboot.flash.locked=1 androidboot.veritymode=enforcing androidboot.selinux=enforcing ro.hardware.gralloc=g98 ro.hw_timeout_multiplier=10 ro.product.model=23127PN0CC ro.product.brand=Xiaomi ro.product.manufacturer=Xiaomi ro.product.device=houji ro.product.name=houji ro.build.type=user ro.build.tags=release-keys ro.serialno="$S" ro.boot.serialno="$S" ro.build.fingerprint=Xiaomi/houji/houji:13/TKQ1.221114.001/V14.0.9.0.TMCCNXM:user/release-keys >/dev/null
+  docker run -d --name "$C" --hostname "$C" --privileged --security-opt label=disable --cap-add SYS_NICE --entrypoint /init --mac-address "$M" -v "/srv/redroid/$C:/data" --device /dev/dri "$IMG" \
+    qemu=1 androidboot.hardware=mt6983 \
+    androidboot.redroid_width="$W" androidboot.redroid_height="$H" androidboot.redroid_dpi="$DPI" androidboot.redroid_fps="$FPS" \
+    androidboot.verifiedbootstate=green androidboot.flash.locked=1 androidboot.veritymode=enforcing androidboot.selinux=enforcing \
+    ro.hardware.gralloc=g98 ro.hw_timeout_multiplier=10 \
+    ro.product.model="$MODEL" ro.product.brand=Xiaomi ro.product.manufacturer=Xiaomi ro.product.device="$DEVICE" ro.product.name="$NAME" \
+    ro.build.flavor="$FLAVOR" ro.build.product="$DEVICE" ro.build.type=user ro.build.tags=release-keys \
+    ro.serialno="$S" ro.boot.serialno="$S" ro.build.fingerprint="$FP" >/dev/null
 }
 if docker inspect "$C" >/dev/null 2>&1; then
   if [ "$(docker inspect -f '{{.State.Running}}' "$C")" != "true" ]; then
@@ -24,16 +35,29 @@ for i in $(seq 1 60); do
   sleep 3
 done
 [ "$B" = "1" ] || { echo "$C boot timeout" >&2; exit 1; }
+# Harden: remove root/adb helpers and ADB keyboard; keep LatinIME for login.
+docker exec "$C" sh -c 'for p in /system/xbin/su /system/bin/su /sbin/su /su/bin/su /system/sbin/su; do rm -f "$p"; done' || true
+docker exec "$C" pm uninstall --user 0 com.android.adbkeyboard >/dev/null 2>&1 || true
+docker exec "$C" settings put secure default_input_method com.android.inputmethod.latin/.LatinIME || true
+docker exec "$C" settings put global adb_enabled 0 || true
+docker exec "$C" setprop service.adb.tcp.port "" || true
+docker exec "$C" setprop ctl.stop adbd || true
 if ! docker exec "$C" pm path com.tencent.mm >/dev/null 2>&1; then
   docker exec "$C" mkdir -p /data/local/tmp
   docker cp /srv/redroid/apk/wechat879.apk "$C:/data/local/tmp/wechat.apk"
   docker exec "$C" pm install -r -g /data/local/tmp/wechat.apk >/dev/null
 fi
-/srv/redroid/container-proxy.sh "$C" "$P" 172.17.0.1 || echo "WARN: proxy setup failed" >&2
+# Direct egress: no Android global proxy until an upstream proxy service is provided.
+docker exec "$C" ip route replace default via 172.17.0.1 dev eth0 2>/dev/null || true
+docker exec "$C" settings put global http_proxy :0 2>/dev/null || true
+docker exec "$C" settings delete global global_http_proxy_host 2>/dev/null || true
+docker exec "$C" settings delete global global_http_proxy_port 2>/dev/null || true
+docker exec "$C" settings delete global global_http_proxy_exclusion_list 2>/dev/null || true
 docker exec "$C" settings put secure android_id "$A" 2>/dev/null || true
 docker exec "$C" settings put global device_name "WX$N" 2>/dev/null || true
 docker exec "$C" settings put secure bluetooth_name "WX$N" 2>/dev/null || true
 docker exec "$C" settings put global adb_enabled 0 2>/dev/null || true
+docker exec "$C" am force-stop com.android.camera2 >/dev/null 2>&1 || true
 sleep 2
 docker exec "$C" am start -n com.tencent.mm/.ui.LauncherUI >/dev/null 2>&1 || true
 echo "$C ready"
