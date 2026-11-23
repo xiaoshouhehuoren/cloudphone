@@ -2,7 +2,7 @@
 
 > 2026-11-22：在 m7 之外新增 4 台只跑微信的 Android 13 容器（2026-11-23 补第 5 台）。每台独立 `/data`、独立
 > serial / MAC / Android ID、独立代理端口；镜像复用 m7 的 `13-mt6983-camfix-v5`。
-> 这 5 台不挂相机，不启 riskcheck 伪装，只保留真机属性。
+> 五台已接入板级空闲相机源与常驻触摸桥；不启 riskcheck 伪装，只保留真机属性。
 >
 > **2026-11-23 更新：** m7 已停用；wx1–wx5 已切到微信 **8.0.79 / versionCode 3200**（RT Probe 钉死版本），5 台运行中。
 >
@@ -16,12 +16,32 @@
 | 容器 | `wx1`–`wx5` |
 | Android | 13；五台均 `fuxi-user`（Xiaomi 13）；`ro.hardware=mt6983` |
 | 数据 | `/srv/redroid/wx1`–`/srv/redroid/wx5` |
-| 设备 | 仅 `/dev/dri`；无 `/dev/video*` |
+| 设备 | 显式 `--device /dev/dri`；privileged 下可见宿主 `/dev/video10`/`11`（相机 idle 源与注入共用） |
 | 网络 | bridge；无 published ports；默认路由 `172.17.0.1` |
 | 代理 | 当前直连（`http_proxy=:0`）；wx1 18082 / wx2 18083 / wx3 18084 / wx4 18085 / wx5 18086 端口保留 |
 | 应用 | `com.tencent.mm` 8.0.79（versionCode 3200，targetSdk 34） |
+| 相机/触摸 | `g98-camidle.service` + 每容器 `g98-wx-touchd@N.service` |
 
-## 2. 身份
+## 2. 相机与触摸
+
+### 2.1 相机
+
+- 宿主 `g98-camidle.service` + `/root/camidle.sh` 持续给 `/dev/video10`、`/dev/video11` 推 640x480 YU12 空转底图，并用 `keepf` 锁格式；没有 producer 时相机 App 也不会报 "Can't connect to the camera"。
+- `wx-start.sh` 每次启动会 `systemctl start g98-camidle`、`chmod 666 /dev/video10/11`、等 `/dev/video10` 的格式变成 `YU12:`、对 10/11 执行 `keepf`，停 `vendor.camera-provider-2-7-ext`，最后 `ctl.restart` 一次 `vendor.camera-provider-2-4-legacy`（只重启一次；不重启会拿到 stale 的 HAL 句柄导致预览黑屏）。
+- 验证：`docker exec wx1 dumpsys media.camera | grep 'Number of camera devices'` 应为 1；`getprop init.svc.vendor.camera-provider-2-4-legacy` 为 running。
+- 外部画面注入沿用 XSHHR 的 `/api/cam/start name=wx1 node=/dev/video10`（`console3.py`）；容器是 privileged，所以不需要额外 `--device`。
+- 限制：provider 2.7-ext 在 redroid 下 SIGABRT，不使用；640x480 在 1080p 预览会拉伸。
+
+### 2.2 触摸
+
+- 每台容器一个 `g98-wx-touchd@N.service`，对应 `/srv/redroid/wx-touchd.py N --tcp 127.0.0.1:1810N`。
+- 桥在容器内用 `inputd.jar` 常驻 `app_process`，反射 `InputManager.injectInputEvent`；不再走 `input tap`（约 140ms）。
+- 控制面：Unix `/run/g98/wx-touch-N.sock`（0600），或本机 TCP `127.0.0.1:1810N`；JSON 行协议 `{"a":"t","fx":0.5,"fy":0.5}`，也支持 `d/m/u/k/raw`。
+- CLI：`python3 /srv/redroid/wx-touch.py 1 tap 0.5 0.5`。
+- 验证：返回 `{"ok": true, "line": "T 540 1200", ...}`；`docker exec wx1 ps -A | grep app_process` 有 inputd 进程。
+- 注意：`g98-wx-touchd@N` 只 `PartOf=g98-wx@N`，不能加 `After=g98-wx@N`，否则 wx-start 里启动 touchd 会死锁。
+
+## 3. 身份
 
 身份表在板子 `/srv/redroid/wx-identities.conf`，仓库副本
 `build/wx-identities.conf`。格式：`容器 serial mac proxy android_id`。
@@ -40,7 +60,7 @@
 Android ID 由 `wx-start.sh` 在 boot 完成后执行 `settings put secure android_id` 写入；
 即使删容器重建也会回到表里的值。不要清 `/srv/redroid/wxN`（应用数据仍会丢）。
 
-## 3. 启动
+## 4. 启动
 
 ```bash
 # 单台
@@ -66,9 +86,12 @@ systemd stop 超时和 start/stop 竞态；数据在 bind mount 里，删容器�
 3. 轮询 `sys.boot_completed=1`（最多 180 秒）；
 4. 没装微信则 `pm install -r -g wechat879.apk`（8.0.79 / 3200）；
 5. 设默认路由并清空 `http_proxy`，走直连；代理端口保留，后续接上游时再启用；
-6. 设 `device_name=WXN`、关闭 `adb_enabled`、启动微信 LauncherUI。
+6. 设 `device_name=WXN`、关闭 `adb_enabled`；
+7. 起 `g98-camidle.service`，等 YU12 + `keepf` 后重启一次 2.4 camera provider；
+8. 起 `g98-wx-touchd@N.service`，建立触摸桥；
+9. 启动微信 LauncherUI。
 
-## 4. 验证
+## 5. 验证
 
 ```bash
 for n in 1 2 3 4 5; do
@@ -92,13 +115,13 @@ docker exec wx1 toybox nc -w 3 www.baidu.com 80; echo $?
 
 当前 18082–18086 的 relay 全部停用，容器 `http_proxy=:0`；如需重新启用代理，先恢复 Windows 代理、隧道和板子 relay。
 
-## 5. 登录
+## 6. 登录
 
 微信首次登录需要手机号/短信或扫码，无法脚本代填。当前 5 台都停在
 `WelcomeActivity`，点 **Log In** 后按正常流程操作即可；登录态落在各自的
 `/srv/redroid/wxN`，重启容器不会掉。
 
-## 6. 已知限制
+## 7. 已知限制
 
 - **公网 IP 仍相同**：5 台走同一条宽带出口；端口不同只区分
   容器身份，不改变公网 IP。要一容器一公网 IP，需要给 `g98-proxy.py` 增加
@@ -108,7 +131,7 @@ docker exec wx1 toybox nc -w 3 www.baidu.com 80; echo $?
   `weixin.qq.com:443`；若后续某个功能提示网络异常，需要上 redsocks/iptables
   做容器级透明代理。
 - **内存**：m7 已停用；五台 1080p 微信当前约 14GiB used / `available` 约 1.0GiB（含 swap 4.3GiB）；第 6 台会超出安全余量，不建议再加。
-- **无相机**：wx1–wx5 没有 `/dev/video*`，Camera2 会报 0 路；这是纯微信容器的预期行为。
+- **相机/触摸依赖宿主组件**：`g98-camidle.service`、`/root/keepf`、`inputd.jar` 或 `/dev/video*` 缺失时，wx 容器仍能启动微信，但相机/触摸不可用；wx-start 对这两步失败不阻断。
 - **微信版本**：当前 8.0.79/3200；APK 为 `/srv/redroid/apk/wechat879.apk`。
   8.0.80/3220 不在 RT Probe 支持列表；只有 8.0.80/3200 才是支持版本。升级 APK 时替换该文件，
   删除对应容器后重启服务（或手动 `pm install`）。

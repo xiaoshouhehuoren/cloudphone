@@ -1,0 +1,12 @@
+[Unit]
+Description=G98 idle camera source (keeps /dev/video10|11 streaming so apps can open the camera)
+After=network.target docker.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh /root/camidle.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

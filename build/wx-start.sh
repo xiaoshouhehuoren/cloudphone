@@ -21,6 +21,28 @@ create() {
     ro.build.flavor="$FLAVOR" ro.build.product="$DEVICE" ro.build.type=user ro.build.tags=release-keys \
     ro.serialno="$S" ro.boot.serialno="$S" ro.build.fingerprint="$FP" >/dev/null
 }
+configure_camera() {
+  systemctl start g98-camidle.service >/dev/null 2>&1 || true
+  for d in /dev/video10 /dev/video11; do [ -e "$d" ] && chmod 666 "$d" || true; done
+  # Wait for the idle producer to lock 640x480 YU12 before setting keep_format.
+  for i in $(seq 1 20); do
+    if grep -q 'YU12:' /sys/devices/virtual/video4linux/video10/format 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  /root/keepf /dev/video10 1 >/dev/null 2>&1 || true
+  /root/keepf /dev/video11 1 >/dev/null 2>&1 || true
+  docker exec "$C" setprop ctl.stop vendor.camera-provider-2-7-ext >/dev/null 2>&1 || true
+  # The legacy provider must be restarted once after keep_format.  A plain
+  # ctl.start leaves a stale HAL and Camera2 fails preview stream setup.
+  docker exec "$C" setprop ctl.restart vendor.camera-provider-2-4-legacy >/dev/null 2>&1 || true
+}
+start_touch() {
+  if [ -f /etc/systemd/system/g98-wx-touchd@.service ]; then
+    systemctl start --no-block "g98-wx-touchd@$N.service" >/dev/null 2>&1 || true
+  fi
+}
 if docker inspect "$C" >/dev/null 2>&1; then
   if [ "$(docker inspect -f '{{.State.Running}}' "$C")" != "true" ]; then
     docker start "$C" >/dev/null 2>&1 || { docker rm -f "$C" >/dev/null 2>&1 || true; create; }
@@ -58,6 +80,8 @@ docker exec "$C" settings put global device_name "WX$N" 2>/dev/null || true
 docker exec "$C" settings put secure bluetooth_name "WX$N" 2>/dev/null || true
 docker exec "$C" settings put global adb_enabled 0 2>/dev/null || true
 docker exec "$C" am force-stop com.android.camera2 >/dev/null 2>&1 || true
+configure_camera
+start_touch
 sleep 2
 docker exec "$C" am start -n com.tencent.mm/.ui.LauncherUI >/dev/null 2>&1 || true
 echo "$C ready"

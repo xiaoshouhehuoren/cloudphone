@@ -1,6 +1,6 @@
 # cloudphone — G98 (RK3588) 云手机平台
 
-把一块 BDY G98 开发板（RK3588 / 15GB / Armbian 6.18 / Docker）做成 **m7 + 5 台 Android 13 云手机**，
+把一块 BDY G98 开发板（RK3588 / 15GB / Armbian 6.18 / Docker）做成 **wx1–wx5 五台 Android 13 云手机**，
 并给它接上**可用的虚拟摄像头**（Camera2 预览 + 拍照）、微信、以及把宿主机任意画面灌进相机的通路。
 
 > **2026-11-23 更新：** m7 已停用（容器删除、服务 disable），当前生产负载是 **wx1–wx5 五台纯微信容器**（五台统一 Xiaomi 13/fuxi + 1080x2400/440dpi/30fps 折中 profile），微信已切到 **8.0.79 / versionCode 3200**（RT Probe 支持版本）。m7 方案保留为记录，可随时重新 enable。
@@ -24,7 +24,12 @@
 | `docs/container-proxy.md` | **每容器独立代理**：反向 SSH + socat + 每容器端口 |
 | `docs/wx-containers.md` | **五台纯微信容器**：wx1–wx5 的身份、代理、服务与验证 |
 | `build/wx-start.sh` | 启动单台微信容器、等待 boot、装微信、配代理 |
-| `build/g98-wx@.service` | systemd 模板：`g98-wx@1..4` |
+| `build/g98-wx@.service` | systemd 模板：`g98-wx@1..5` |
+| `build/wx-touchd.py` | 每容器触摸桥：inputd + Unix socket + loopback TCP |
+| `build/wx-touch.py` | 触摸桥 CLI（`tap/down/move/up/key/raw`） |
+| `build/g98-wx-touchd@.service` | 每容器触摸桥 systemd 模板 |
+| `build/camidle.sh` | 宿主空闲相机源：640x480 YU12 → `/dev/video10/11` |
+| `build/g98-camidle.service` | 空闲相机源 systemd 服务 |
 | `build/wx-identities.conf` | wx1–wx5 的 serial / MAC / Android ID / 代理端口表 |
 | `build/g98-proxy-relay@.service` | 按端口模板把 docker0 暴露到板子 127.0.0.1 |
 | `build/container-proxy.sh` | 给容器设默认路由 + Android 全局代理 |
@@ -42,10 +47,10 @@
 
 - 当前 **wx1–wx5** 五台纯微信容器（8.0.79/3200）；m7 已于 2026-11-23 停用，`m1`–`m6` 和 VM 线均已停用。
 - 每容器代理：wx1–wx5 18082–18086 端口保留，当前直连（`http_proxy=:0`）；m7 的 18081 配置保留但当前不启动；详见 `docs/container-proxy.md`。
-- 相机：m7 双路 Back/Front，宿主 ffmpeg → `/dev/video14/15`。
-- 外部画面：宿主写 `/dev/video14`（容器 `/dev/video10`）即可。
+- 相机：wx1–wx5 共享宿主空闲源 `/dev/video10/11`；`g98-camidle` 保活，启动时等 YU12 + `keepf` 后重启一次 2.4 provider，Camera2 可见 1 路。
+- 外部画面：宿主写 `/dev/video10`（容器内同一节点）即可；触摸用 `/srv/redroid/wx-touch.py N tap 0.5 0.5`。
 - RT：历史 m6 验证记录保留在 `docs/rt-implementation.md`。
-- 已知限制：单容器独占 v4l2 节点、代理依赖 Windows 在线、native 直连可能绕过全局代理、5 台微信仍共用同一条公网出口；微信登录需人工。
+- 已知限制：v4l2 节点由五台共享、代理依赖 Windows 在线、native 直连可能绕过全局代理、5 台微信仍共用同一条公网出口；相机 640x480 会拉伸，触摸桥依赖宿主 `inputd.jar`；微信登录需人工。
 
 ## 许可
 
