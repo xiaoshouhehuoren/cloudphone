@@ -12,10 +12,12 @@ Control API (JSON, localhost):
   POST /idle  {"node":"/dev/video10"}
   GET  /state -> {"nodes":{...}}
 """
+import collections
 import errno
 import faulthandler
 import json
 import os
+import queue
 import select
 import signal
 import stat
@@ -49,7 +51,32 @@ def idle_cmd(node):
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
 
 
+def jpeg_vf():
+    return ("scale=%d:%d:force_original_aspect_ratio=decrease,"
+            "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p"
+            % (W, H, W, H))
+
+
+def jpeg_one_cmd(path):
+    """Decode ONE JPEG file into one YU12 frame (about 44 ms per frame)."""
+    return [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "mjpeg",
+            "-i", path, "-vf", jpeg_vf(), "-f", "rawvideo",
+            "-pix_fmt", "yuv420p", "-"]
+
+
+def jpeg_cmd():
+    """Decode JPEG frames pushed over HTTP (browser fallback when WebRTC fails)."""
+    # nobuffer/low_delay: without them the mjpeg demuxer sits on the pipe
+    # (never EOF for a live stream) and emits nothing at all.
+    # A single long-lived mjpeg decoder on pipe:0 stalls after the first
+    # frame here (40 JPEGs in, 1 frame out), so JPEG frames are decoded one
+    # at a time by JpegDecoder instead.
+    return jpeg_one_cmd("/tmp/camd-unused.jpg")
+
+
 def source_cmd(kind, arg):
+    if kind == "jpeg":
+        return jpeg_one_cmd("/tmp/camd-unused.jpg")
     if kind == "image":
         return [FFMPEG, "-hide_banner", "-loglevel", "error", "-re",
                 "-loop", "1", "-i", arg,
@@ -87,6 +114,40 @@ class Reader(threading.Thread):
         self.stop = threading.Event()
         self.frames = 0
         self.restarts = 0
+        self.stdin_lock = threading.RLock()
+        self.dropped = 0
+        self.fed_frames = 0
+        # Frames that arrive before the decoder exists.  The mjpeg demuxer gets
+        # stuck if it is started against an empty pipe, so we spawn it lazily
+        # once the first frame is actually here.
+        self.pending = collections.deque(maxlen=6)
+
+    def feed(self, data):
+        """Push one encoded JPEG into the decoder; drops frames instead of blocking."""
+        proc = self.proc
+        with self.stdin_lock:
+            if proc is None or proc.stdin is None:
+                self.pending.append(data)
+                return True
+            view = memoryview(data)
+            try:
+                # A pipe write may be partial: send the whole JPEG or nothing,
+                # otherwise the mjpeg demuxer sees a truncated image and drops it.
+                while view:
+                    n = proc.stdin.write(view)
+                    if not n:
+                        self.dropped += 1
+                        return False
+                    view = view[n:]
+                proc.stdin.flush()
+                self.fed_frames += 1
+                if self.fed_frames <= 3 or self.fed_frames % 100 == 0:
+                    print("camd: jpeg fed #%d %dB (dropped %d)" %
+                          (self.fed_frames, len(data), self.dropped), flush=True)
+                return True
+            except (BlockingIOError, OSError, ValueError):
+                self.dropped += 1
+                return False
 
     def run(self):
         # A source can die or not exist yet (e.g. an RTSP publisher that comes up
@@ -101,14 +162,36 @@ class Reader(threading.Thread):
             time.sleep(1.0)
 
     def _run_once(self):
+        if self.kind == "jpeg":
+            # Wait for real data before spawning: starting ffmpeg on an empty
+            # pipe makes its mjpeg demuxer block and never recover.
+            deadline = time.time() + 60
+            while not self.stop.is_set() and time.time() < deadline:
+                with self.stdin_lock:
+                    if self.pending:
+                        break
+                time.sleep(0.05)
+            if self.stop.is_set():
+                return
         cmd = idle_cmd(self.node) if self.kind == "idle" else source_cmd(self.kind, self.arg)
         print("camd: reader spawn %s %s" % (self.node, " ".join(cmd[-6:])), flush=True)
         try:
-            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL, bufsize=0)
+            errsink = open("/tmp/camd-jpeg.err", "ab") if self.kind == "jpeg" else subprocess.DEVNULL
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE,
+                                         stderr=errsink, bufsize=0)
         except Exception as exc:  # noqa: BLE001
             print("camd: spawn failed %s: %s" % (self.kind, exc), flush=True)
             return
+
+        if self.kind == "jpeg":
+            with self.stdin_lock:
+                pre = list(self.pending)
+                self.pending.clear()
+            print("camd: jpeg decoder up pid=%d pre=%d" % (self.proc.pid, len(pre)), flush=True)
+            for d in pre:
+                self.feed(d)
+            print("camd: jpeg pre-fed ok=%d" % len(pre), flush=True)
         buf = bytearray()
         fd = self.proc.stdout
         # Non-blocking reads: select() can report readiness for a partially
@@ -149,6 +232,8 @@ class Reader(threading.Thread):
                 del buf[:FRAME_SIZE]
                 self.frames += 1
                 self.on_frame(frame)
+        if self.kind == "jpeg":
+            print("camd: jpeg decoder exit frames=%d poll=%s" % (self.frames, self.proc.poll()), flush=True)
         # Do NOT set self.stop here: that belongs to set_source(). Leaving it set
         # made a dead source permanent, so run() never got to restart it.
         if self.proc.poll() is None:
@@ -170,6 +255,68 @@ class Reader(threading.Thread):
             pass
 
 
+class JpegDecoder(threading.Thread):
+    """Decode pushed JPEG frames into YU12 frames, one ffmpeg per frame."""
+
+    def __init__(self, node, on_frame):
+        super().__init__(daemon=True)
+        self.node = node
+        self.on_frame = on_frame
+        self.q = queue.Queue(maxsize=1)
+        self.stop = threading.Event()
+        self.frames = 0
+        self.dropped = 0
+        self.errors = 0
+        self.restarts = 0
+        self.proc = None
+        self.tmp = "/dev/shm/camd-%s.jpg" % node.rsplit("/", 1)[-1]
+
+    def push(self, data):
+        """Queue one JPEG; a full queue drops the stale frame instead of lagging."""
+        try:
+            self.q.put_nowait(data)
+            return True
+        except queue.Full:
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                pass
+            self.dropped += 1
+            try:
+                self.q.put_nowait(data)
+            except queue.Full:
+                pass
+            return True
+
+    def run(self):
+        while not self.stop.is_set():
+            try:
+                data = self.q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                with open(self.tmp, "wb") as fh:
+                    fh.write(data)
+                res = subprocess.run(jpeg_one_cmd(self.tmp), capture_output=True,
+                                     timeout=5)
+                if len(res.stdout) == FRAME_SIZE:
+                    self.frames += 1
+                    self.on_frame(res.stdout)
+                else:
+                    self.errors += 1
+                    if self.errors <= 3 or self.errors % 200 == 0:
+                        print("camd: jpeg decode %s short %dB rc=%d" %
+                              (self.node, len(res.stdout), res.returncode), flush=True)
+            except Exception as exc:  # noqa: BLE001
+                self.errors += 1
+                if self.errors <= 3 or self.errors % 200 == 0:
+                    print("camd: jpeg decode %s failed: %s" % (self.node, exc), flush=True)
+        try:
+            os.unlink(self.tmp)
+        except OSError:
+            pass
+
+
 class NodeRouter:
     def __init__(self, node):
         self.node = node
@@ -180,6 +327,7 @@ class NodeRouter:
         self.arg = None
         self.since = 0.0
         self.reader = None
+        self.decoder = None
         self.fd = None
         self.written = 0
         self.errors = 0
@@ -252,17 +400,30 @@ class NodeRouter:
 
     def set_source(self, kind, arg):
         with self.lock:
-            old = self.reader
+            old, old_dec = self.reader, self.decoder
             self.kind, self.arg, self.since = kind, arg, time.time()
-        if old is not None:
-            old.stop.set()
-            if old.proc is not None and old.proc.poll() is None:
-                old.proc.terminate()
+        for obj in (old, old_dec):
+            if obj is not None:
+                obj.stop.set()
+                if getattr(obj, "proc", None) is not None and obj.proc.poll() is None:
+                    obj.proc.terminate()
+        if kind == "jpeg":
+            dec = JpegDecoder(self.node, self._on_frame)
+            with self.lock:
+                self.reader, self.decoder = None, dec
+            dec.start()
+            return dec
         reader = Reader(self.node, kind, arg, self._on_frame)
         with self.lock:
-            self.reader = reader
+            self.reader, self.decoder = reader, None
         reader.start()
         return reader
+
+    def feed(self, data):
+        dec = self.decoder
+        if dec is None:
+            return False
+        return dec.push(data)
 
     def snapshot(self):
         with self.lock:
@@ -274,8 +435,12 @@ class NodeRouter:
                 "written": self.written,
                 "errors": self.errors,
                 "since": self.since,
-                "source_frames": self.reader.frames if self.reader else 0,
-                "source_restarts": self.reader.restarts if self.reader else 0,
+                "source_frames": (self.decoder or self.reader).frames
+                                 if (self.decoder or self.reader) else 0,
+                "source_restarts": (self.decoder or self.reader).restarts
+                                   if (self.decoder or self.reader) else 0,
+                "source_dropped": (self.decoder or self.reader).dropped
+                                  if (self.decoder or self.reader) else 0,
             }
 
 
@@ -311,6 +476,25 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path.startswith("/frame"):
+            # Raw JPEG body from the phone's browser fallback (WebRTC unusable).
+            # localhost only, so a size cap is enough protection.
+            node = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("node", [""])[0]
+            router = self.routers.get(node)
+            if router is None:
+                self._send({"error": "unknown node " + str(node)}, 404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 8 * 1024 * 1024:
+                self._send({"error": "bad length"}, 400)
+                return
+            data = self.rfile.read(length)
+            ok = router.feed(data)
+            self._send({"ok": ok, "bytes": len(data)})
+            return
         if not self.path.startswith("/set"):
             self._send({"error": "not found"}, 404)
             return
@@ -332,6 +516,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if kind == "rtsp" and not arg:
             self._send({"error": "url required"}, 400)
+            return
+        if kind == "jpeg" and arg and not str(arg).startswith("webcam"):
+            self._send({"error": "bad jpeg tag"}, 400)
             return
         try:
             router.set_source(kind, arg)
