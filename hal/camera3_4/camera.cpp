@@ -317,8 +317,36 @@ int Camera::processCaptureRequest(camera3_capture_request_t *temp_request)
     }
 
     // Make a persistent copy of request, since otherwise it won't live
-    // past the end of this method.
+    // past the end of this method. Validate every borrowed pointer before
+    // logging or copying it; num_output_buffers is uint32_t, so unsigned
+    // comparisons against zero are meaningless and must not be used.
+    if (temp_request->num_output_buffers == 0 ||
+        temp_request->num_output_buffers > 16 ||
+        temp_request->output_buffers == nullptr) {
+        ALOGE("Camera: rejecting invalid output array count=%u ptr=%p",
+              temp_request->num_output_buffers, temp_request->output_buffers);
+        return -EINVAL;
+    }
+    for (uint32_t i = 0; i < temp_request->num_output_buffers; ++i) {
+        const camera3_stream_buffer_t& b = temp_request->output_buffers[i];
+        if (b.stream == nullptr || b.buffer == nullptr || *b.buffer == nullptr) {
+            ALOGE("Camera: rejecting invalid output[%u] stream=%p bufptr=%p",
+                  i, b.stream, b.buffer);
+            return -EINVAL;
+        }
+        const native_handle_t* h = *b.buffer;
+        if (h->version != (int)sizeof(native_handle_t) ||
+            h->numFds < 0 || h->numFds > 16 ||
+            h->numInts < 0 || h->numInts > 128) {
+            ALOGE("Camera: rejecting invalid output[%u] handle=%p v=%d fds=%d ints=%d",
+                  i, h, h->version, h->numFds, h->numInts);
+            return -EINVAL;
+        }
+    }
+    ALOGE("Camera: pre-copy frame=%u outputs=%u array=%p", temp_request->frame_number,
+          temp_request->num_output_buffers, temp_request->output_buffers);
     std::shared_ptr<CaptureRequest> request = std::make_shared<CaptureRequest>(temp_request);
+    ALOGE("Camera: post-copy frame=%u outputs=%zu", request->frame_number, request->output_buffers.size());
 
     ALOGV("%s:%d: frame: %d", __func__, mId, request->frame_number);
 
@@ -543,6 +571,9 @@ void Camera::completeRequestWithError(std::shared_ptr<CaptureRequest> request)
 }
 
 void Camera::sendResult(std::shared_ptr<CaptureRequest> request) {
+    // HAL-side processing uses owned clones; camera3 results must return the
+    // original framework-owned handles, never the HAL-owned clone pointers.
+    request->RestoreFrameworkOutputHandles();
     // Fill in the result struct
     // (it only needs to live until the end of the framework callback).
     camera3_capture_result_t result {

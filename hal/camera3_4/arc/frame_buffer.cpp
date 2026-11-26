@@ -132,6 +132,8 @@ GrallocFrameBuffer::~GrallocFrameBuffer() {
     LOGF(ERROR) << "Unmap failed";
   }
   if (owned_handle_) {
+    // close() the dup'ed dma-buf fds as well: native_handle_delete() does not.
+    native_handle_close(owned_handle_);
     native_handle_delete(owned_handle_);
     owned_handle_ = nullptr;
   }

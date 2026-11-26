@@ -1,0 +1,14 @@
+[Unit]
+Description=G98 mediamtx (RTSP/WebRTC relay)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/mediamtx_dir
+ExecStart=/root/mediamtx_dir/mediamtx
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

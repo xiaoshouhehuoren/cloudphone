@@ -22,8 +22,10 @@
 #include <algorithm>
 #include <fcntl.h>
 #include <limits>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <android-base/unique_fd.h>
 #include <linux/videodev2.h>
@@ -708,6 +710,24 @@ int V4L2Wrapper::DequeueRequest(std::shared_ptr<CaptureRequest>* request) {
     return -EAGAIN;
   }
 
+  // Wait for a frame with poll() instead of spinning on DQBUF. Without this
+  // the dequeue worker busy-loops at 100% of one core whenever a request is in
+  // flight but the next frame has not arrived yet (v4l2loopback returns EAGAIN
+  // immediately, it does not block).
+  if (connected()) {
+    struct pollfd pfd = {};
+    pfd.fd = device_fd_.get();
+    pfd.events = POLLIN;
+    int pr = poll(&pfd, 1, 50);
+    if (pr == 0) {
+      return -EAGAIN;
+    }
+    if (pr < 0 && errno != EINTR) {
+      HAL_LOGE("poll fails: %s", strerror(errno));
+      return -ENODEV;
+    }
+  }
+
   v4l2_buffer buffer;
   memset(&buffer, 0, sizeof(buffer));
   buffer.type = format_->type();
@@ -733,6 +753,16 @@ int V4L2Wrapper::DequeueRequest(std::shared_ptr<CaptureRequest>* request) {
   RequestContext* request_context = &buffers_[buffer.index];
   if (!request_context->request) {
     HAL_LOGW("Dequeued buffer %u has no pending request.", buffer.index);
+    // Give the slot straight back: dropping the frame without requeueing starves
+    // the producer, and because the fd stays POLLIN-ready this path then spins a
+    // whole core on providers that stream faster than the client requests.
+    v4l2_buffer requeue;
+    memset(&requeue, 0, sizeof(requeue));
+    requeue.type = buffer.type;
+    requeue.memory = buffer.memory;
+    requeue.index = buffer.index;
+    IoctlLocked(VIDIOC_QBUF, &requeue);
+    usleep(2000);
     return -EAGAIN;
   }
 

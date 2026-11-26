@@ -38,7 +38,13 @@ struct CaptureRequest {
   CaptureRequest(const camera3_capture_request_t* request);
   ~CaptureRequest();
 
+  // Restore the framework-owned handles before sending a capture result.
+  // Async HAL work uses owned_output_handles_, but camera3 requires the
+  // original buffer handles in process_capture_result.
+  void RestoreFrameworkOutputHandles();
+
  private:
+  std::vector<buffer_handle_t> framework_output_handles_;
   // Owned clones of output buffer handles. The native handles passed by the
   // camera service are only valid for the duration of processCaptureRequest;
   // the HAL uses them asynchronously in DequeueRequest.

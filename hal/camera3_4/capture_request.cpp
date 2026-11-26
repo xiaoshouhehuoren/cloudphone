@@ -18,6 +18,19 @@
 
 #include <cutils/native_handle.h>
 #include <log/log.h>
+#include <mutex>
+#include <unordered_map>
+
+namespace {
+std::mutex g_last_handle_mu;
+std::unordered_map<const buffer_handle_t*, native_handle_t*> g_last_handle;
+static bool valid_native_handle(const native_handle_t* h) {
+  return h && h->version == (int)sizeof(native_handle_t) &&
+         h->numFds >= 0 && h->numFds <= 16 &&
+         h->numInts >= 0 && h->numInts <= 128;
+}
+}
+
 
 namespace default_camera_hal {
 
@@ -25,13 +38,30 @@ CaptureRequest::CaptureRequest() : CaptureRequest(nullptr) {}
 
 CaptureRequest::~CaptureRequest() {
   for (buffer_handle_t handle : owned_output_handles_) {
-    native_handle_delete(const_cast<native_handle_t*>(handle));
+    if (handle) {
+      // native_handle_clone() dup()ed every fd; native_handle_delete() only
+      // frees the struct, so the dup'ed dma-buf fds must be closed here or the
+      // provider leaks ~one fd per frame until it hits RLIMIT_NOFILE.
+      native_handle_close(const_cast<native_handle_t*>(handle));
+      native_handle_delete(const_cast<native_handle_t*>(handle));
+    }
   }
 }
 
 CaptureRequest::CaptureRequest(const camera3_capture_request_t* request) {
+  ALOGE("CaptureRequest: CTOR request=%p", request);
   if (!request) {
     return;
+  }
+  ALOGE("CaptureRequest: CTOR fields req=%p frame=%u nout=%u outs=%p input=%p",
+        request, request->frame_number, request->num_output_buffers,
+        request->output_buffers, request->input_buffer);
+  for (uint32_t i = 0; i < request->num_output_buffers && i < 8; ++i) {
+    const camera3_stream_buffer_t& b = request->output_buffers[i];
+    const native_handle_t* h = b.buffer ? *b.buffer : nullptr;
+    ALOGE("CaptureRequest: CTOR buf[%u] stream=%p bufptr=%p h=%p v=%d fds=%d ints=%d",
+          i, b.stream, b.buffer, h, h ? h->version : -1,
+          h ? h->numFds : -1, h ? h->numInts : -1);
   }
 
   frame_number = request->frame_number;
@@ -58,21 +88,40 @@ CaptureRequest::CaptureRequest(const camera3_capture_request_t* request) {
   output_buffers.insert(output_buffers.end(),
                         request->output_buffers,
                         request->output_buffers + num_output_buffers);
+  framework_output_handles_.reserve(output_buffers.size());
+  for (const auto& output_buffer : output_buffers) {
+    framework_output_handles_.push_back(
+        output_buffer.buffer ? *output_buffer.buffer : nullptr);
+  }
 
-  // Clone output buffer handles while the HIDL call (and therefore their fds)
-  // are still alive. Without this, DequeueRequest later sees EBADF.
-  owned_output_handles_.reserve(num_output_buffers);
-  for (auto& output_buffer : output_buffers) {
-    if (output_buffer.buffer == nullptr || *output_buffer.buffer == nullptr) {
-      continue;
-    }
-    native_handle_t* clone = native_handle_clone(*output_buffer.buffer);
-    if (clone == nullptr) {
-      ALOGE("%s: Failed to clone output buffer handle", __func__);
-      continue;
-    }
+  // The request is used asynchronously after processCaptureRequest returns.
+  // Clone each native handle while the framework-owned request is still valid.
+  // Keep clone addresses stable, then rewrite buffer pointers only after all
+  // clones are stored; this avoids both framework-handle UAF and vector pointer
+  // invalidation.
+  owned_output_handles_.reserve(output_buffers.size());
+  for (const auto& output_buffer : output_buffers) {
+    const native_handle_t* incoming =
+        output_buffer.buffer ? *output_buffer.buffer : nullptr;
+    native_handle_t* clone = incoming ? native_handle_clone(incoming) : nullptr;
+    ALOGE("CaptureRequest: clone src=%p v=%d fds=%d ints=%d dst=%p v=%d fds=%d ints=%d",
+          incoming, incoming ? incoming->version : -1, incoming ? incoming->numFds : -1,
+          incoming ? incoming->numInts : -1, clone, clone ? clone->version : -1,
+          clone ? clone->numFds : -1, clone ? clone->numInts : -1);
     owned_output_handles_.push_back(clone);
-    output_buffer.buffer = &owned_output_handles_.back();
+  }
+  for (size_t i = 0; i < output_buffers.size(); ++i) {
+    if (owned_output_handles_[i]) {
+      output_buffers[i].buffer = &owned_output_handles_[i];
+    }
+  }
+}
+
+void CaptureRequest::RestoreFrameworkOutputHandles() {
+  const size_t count = std::min(output_buffers.size(),
+                                framework_output_handles_.size());
+  for (size_t i = 0; i < count; ++i) {
+    output_buffers[i].buffer = &framework_output_handles_[i];
   }
 }
 
