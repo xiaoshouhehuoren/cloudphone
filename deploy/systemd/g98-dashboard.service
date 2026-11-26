@@ -1,0 +1,13 @@
+[Unit]
+Description=G98 Cloud Phone status dashboard
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/console3.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

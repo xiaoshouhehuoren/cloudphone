@@ -13,8 +13,10 @@ Control API (JSON, localhost):
   GET  /state -> {"nodes":{...}}
 """
 import errno
+import faulthandler
 import json
 import os
+import select
 import signal
 import stat
 import subprocess
@@ -26,6 +28,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 W, H = 640, 480
 FRAME_SIZE = W * H * 3 // 2
 FPS = int(os.environ.get("G98_CAMD_FPS", "30"))
+# A reader that produces nothing within START_TIMEOUT seconds is restarted; a
+# running source that goes silent for MAX_SILENCE seconds is restarted too.
+START_TIMEOUT = float(os.environ.get("G98_CAMD_START_TIMEOUT", "8"))
+MAX_SILENCE = float(os.environ.get("G98_CAMD_MAX_SILENCE", "10"))
 IDLE_FPS = int(os.environ.get("G98_CAMD_IDLE_FPS", "5"))
 FFMPEG = "/root/ffmpeg"
 KEEPF = "/root/keepf"
@@ -80,9 +86,23 @@ class Reader(threading.Thread):
         self.proc = None
         self.stop = threading.Event()
         self.frames = 0
+        self.restarts = 0
 
     def run(self):
+        # A source can die or not exist yet (e.g. an RTSP publisher that comes up
+        # after us). Keep retrying instead of leaving the node on its last frame.
+        while not self.stop.is_set():
+            self._run_once()
+            if self.stop.is_set():
+                break
+            self.restarts += 1
+            print("camd: source %s %s ended, restart #%d" %
+                  (self.kind, self.arg, self.restarts), flush=True)
+            time.sleep(1.0)
+
+    def _run_once(self):
         cmd = idle_cmd(self.node) if self.kind == "idle" else source_cmd(self.kind, self.arg)
+        print("camd: reader spawn %s %s" % (self.node, " ".join(cmd[-6:])), flush=True)
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL, bufsize=0)
@@ -91,17 +111,46 @@ class Reader(threading.Thread):
             return
         buf = bytearray()
         fd = self.proc.stdout
+        # Non-blocking reads: select() can report readiness for a partially
+        # filled pipe or a stream that stalls mid-frame, and a blocking read
+        # would then hang this thread forever with the node frozen.
+        try:
+            os.set_blocking(fd.fileno(), False)
+        except OSError:
+            pass
+        started = last = time.time()
         while not self.stop.is_set():
-            chunk = fd.read(FRAME_SIZE * 4)
-            if not chunk:
+            # Timeouts are enforced here, not only when select() reports idle: a
+            # source that is connected but never sends (RTSP path with no
+            # publisher) can keep the pipe "ready" with zero bytes forever.
+            now = time.time()
+            if now - last > MAX_SILENCE or (self.frames == 0 and now - started > START_TIMEOUT):
                 break
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if not ready:
+                continue
+            try:
+                # A non-blocking FileIO read returns None when the kernel has
+                # nothing for us, and b"" only at EOF.
+                chunk = fd.read(FRAME_SIZE * 4)
+            except BlockingIOError:
+                continue
+            if chunk is None:
+                continue
+            if not chunk:
+                if self.proc.poll() is not None:
+                    break
+                time.sleep(0.005)
+                continue
+            last = time.time()
             buf += chunk
             while len(buf) >= FRAME_SIZE:
                 frame = bytes(buf[:FRAME_SIZE])
                 del buf[:FRAME_SIZE]
                 self.frames += 1
                 self.on_frame(frame)
-        self.stop.set()
+        # Do NOT set self.stop here: that belongs to set_source(). Leaving it set
+        # made a dead source permanent, so run() never got to restart it.
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -226,6 +275,7 @@ class NodeRouter:
                 "errors": self.errors,
                 "since": self.since,
                 "source_frames": self.reader.frames if self.reader else 0,
+                "source_restarts": self.reader.restarts if self.reader else 0,
             }
 
 
@@ -332,4 +382,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # kill -USR1 <pid> dumps every reader/writer stack; invaluable when a source
+    # silently stops delivering frames.
+    try:
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+    except Exception:
+        pass
     main()

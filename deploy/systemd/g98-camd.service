@@ -1,0 +1,25 @@
+[Unit]
+Description=G98 camera frame router (camd)
+After=network.target systemd-modules-load.service
+Before=g98-dashboard.service
+
+[Service]
+Type=simple
+Environment=G98_CAMD_NODES=/dev/video20,/dev/video21,/dev/video22,/dev/video23,/dev/video24,/dev/video25,/dev/video26,/dev/video27,/dev/video28,/dev/video29
+Environment=G98_CAMD_PORT=8100
+Environment=G98_CAMD_FPS=30
+# The HAL enqueues requests at the preview rate, so an under-fed node makes the
+# camera service miss its 5s watchdog. Keep idle at full rate.
+Environment=G98_CAMD_IDLE_FPS=30
+ExecStartPre=/bin/bash /root/g98-camd-prep.sh
+ExecStart=/usr/bin/python3 /root/g98-camd.py
+# Adopting means restarting the provider inside every container, which can take
+# a minute; running it in the foreground makes systemd time out the whole unit,
+# so hand it to a detached shell and keep the unit start instant.
+ExecStartPost=/bin/bash -c 'nohup /bin/bash /root/g98-camd-adopt.sh >/tmp/g98-camd-adopt.log 2>&1 &'
+TimeoutStartSec=25
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
