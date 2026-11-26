@@ -153,8 +153,10 @@ def hard_reset(name):
     run([DOCKER, "exec", name, "am", "force-stop", "com.android.camera2"])
     run([DOCKER, "exec", name, "setprop", "ctl.restart",
          "vendor.camera-provider-2-4-legacy"])
-    time.sleep(1)
+    # Give the provider time to bind its nodes before cameraserver reconnects.
+    time.sleep(3)
     run([DOCKER, "exec", name, "setprop", "ctl.restart", "cameraserver"])
+    time.sleep(3)
     deadline = time.time() + 20
     while time.time() < deadline:
         if camera_devices(name) == 2:
@@ -174,7 +176,7 @@ def soft_reset(name):
 def launch_camera(name):
     run([DOCKER, "exec", name, "am", "start", "-n",
          "com.android.camera2/com.android.camera.CameraLauncher"])
-    deadline = time.time() + 12
+    deadline = time.time() + 15
     while time.time() < deadline:
         if device0_open(name) is True:
             return True
@@ -223,13 +225,11 @@ def verify(name):
     px = (-1, -1, -1)
     tries = 0
     for attempt in range(2):
-        # Restarting the provider while the app is starting is what produces the
-        # "Camera error: Can't connect to the camera" dialog, so only rebuild the
-        # provider when it is actually broken (devices != 2).
-        if camera_devices(name) != 2:
-            hard_reset(name)
-        else:
-            soft_reset(name)
+        # A leftover session from a previous run (or from a manual screencap) can
+        # leave the client wedged while devices still reports 2, so always rebuild
+        # the provider *before* the app starts: that is the one order that never
+        # produces the "Camera error" dialog.
+        hard_reset(name)
         launch_camera(name)
 
         started = time.time()
