@@ -2530,6 +2530,9 @@ function camFitOpts(){
   if(rotEl) o.rotate=parseInt(rotEl.value,10)||0;
   return o;
 }
+function camStartPost(body){
+  return post('/api/cam/start', Object.assign({}, body, camFitOpts()));
+}
 function camGeomShow(node){
   if(!S.sel) return;
   post('/api/cam/geom', {name:S.sel, node:node||''}).then(function(j){
@@ -2555,7 +2558,7 @@ function camStartFile(){
      if(!j || j.error){ camLog('上传失败：' + ((j && j.error) || '未知')); return null; }
      camLog('已存 ' + j.path + '（' + j.bytes + ' B），板子侧起 ffmpeg…');
      setTimeout(camLibLoad, 400);
-     return post('/api/cam/start', {name: S.sel, node: node, path: j.path, kind: kind});
+     return camStartPost({name: S.sel, node: node, path: j.path, kind: kind});
    })
    .then(function(j){
      if(!j) return;
@@ -2570,7 +2573,7 @@ function camLibInject(path, kind){
   if(!S.sel){ camLog('先选一台实例'); return; }
   var node = el('camnode').value;
   camLog('热切注入 ' + path.split('/').pop() + ' …');
-  post('/api/cam/start', {name: S.sel, node: node, path: path, kind: kind})
+  camStartPost({name: S.sel, node: node, path: path, kind: kind})
    .then(function(j){
      if(!j || j.error){ camLog('注入失败：' + ((j && j.error) || '未知')); return; }
      camLog('已提交 ' + (j.node || node) + ' · ' + kind + '，等待云手机相机…');
@@ -2628,7 +2631,7 @@ function camStartURL(){
   if(!new RegExp('^(rtsp|rtsps|http|https)://', 'i').test(url)){ camLog('填 rtsp:// 或 http(s):// 地址'); return; }
   var node = el('camnode').value;
   camLog('连接外部流… ' + url);
-  post('/api/cam/start', {name:S.sel, node:node, path:url, kind:'stream'})
+  camStartPost({name:S.sel, node:node, path:url, kind:'stream'})
    .then(function(j){
      if(!j || j.error){ camLog('接入失败：' + ((j && j.error) || '未知') + ' ' + ((j && j.log) || '')); return; }
      camLog('已提交接入 ' + (j.node || node) + '，等待云手机相机…');
