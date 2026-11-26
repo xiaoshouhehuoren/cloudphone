@@ -1,0 +1,14 @@
+[Unit]
+Description=G98 WeChat container wx%i
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/flock -w 300 /run/g98-wx.lock /srv/redroid/wx-start.sh %i
+ExecStop=/usr/bin/docker rm -f wx%i
+TimeoutStartSec=360
+
+[Install]
+WantedBy=multi-user.target

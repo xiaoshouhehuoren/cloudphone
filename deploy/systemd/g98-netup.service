@@ -1,0 +1,13 @@
+[Unit]
+Description=G98 redroid netup watcher
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/root/g98-netup-all.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

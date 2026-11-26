@@ -1354,6 +1354,11 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
 .filepick{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 14px;border:1px solid rgba(122,162,255,.38);border-radius:9px;background:rgba(70,110,255,.14);color:#d8e6ff;font-size:11px;cursor:pointer;white-space:nowrap}
 .filepick:hover{background:rgba(70,110,255,.24)}
 #camfile{display:none}
+.camlib{max-height:168px;overflow:auto;border:1px solid var(--line);border-radius:9px;padding:4px;background:rgba(0,0,0,.18)}
+.camlib-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 7px;border-radius:7px;cursor:pointer;font-size:12px;color:var(--txt)}
+.camlib-item:hover{background:rgba(90,150,255,.16)}
+.camlib-item b{font-weight:600}
+.camlib-item span{color:var(--dim);font-size:11px;white-space:nowrap}
 #camfname{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #camstop{color:#ffc4c4;border-color:rgba(255,120,120,.3)}
 .camdrawer select,.camdrawer input[type=file],.camdrawer input:not([type=file]){width:100%;background:rgba(0,0,0,.28);color:var(--txt);border:1px solid var(--line);border-radius:9px;padding:8px 9px;font-size:11px;outline:none}
@@ -1491,6 +1496,8 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
           <span id="camfname" class="mini">未选择文件</span>
           <input type="file" id="camfile" accept="video/*,image/*">
         </div>
+        <label class="mini">素材库（点一下即热切注入，无需重启相机）</label>
+        <div id="camlib" class="camlib"><div class="mini">加载中…</div></div>
         <div class="camrow">
           <button class="primary" id="camstart">注入文件</button>
           <button class="ghost" id="camstop">停止</button>
@@ -2389,7 +2396,7 @@ function camFillNodes(){
   for(var i = 0; i < s.options.length; i++){ if(s.options[i].value === cur){ keep = true; break; } }
   s.value = keep ? cur : n.back;
 }
-function openCam(){ camFillNodes(); setTab('cam'); }
+function openCam(){ camFillNodes(); setTab('cam'); setTimeout(camLibLoad, 150); }
 function closeCam(){ setTab('info'); }
 el('camopen').addEventListener('click', openCam);
 // desktop camera controls now live in the inspector "相机" tab
@@ -2518,6 +2525,7 @@ function camStartFile(){
    .then(function(j){
      if(!j || j.error){ camLog('上传失败：' + ((j && j.error) || '未知')); return null; }
      camLog('已存 ' + j.path + '（' + j.bytes + ' B），板子侧起 ffmpeg…');
+     setTimeout(camLibLoad, 400);
      return post('/api/cam/start', {name: S.sel, node: node, path: j.path, kind: kind});
    })
    .then(function(j){
@@ -2527,6 +2535,43 @@ function camStartFile(){
      camTrack(S.sel, j.node || node);
    })
    .catch(function(e){ camLog('出错：' + e); });
+}
+function camLibSize(n){ return n >= 1048576 ? (n/1048576).toFixed(1)+' MB' : Math.round(n/1024)+' KB'; }
+function camLibInject(path, kind){
+  if(!S.sel){ camLog('先选一台实例'); return; }
+  var node = el('camnode').value;
+  camLog('热切注入 ' + path.split('/').pop() + ' …');
+  post('/api/cam/start', {name: S.sel, node: node, path: path, kind: kind})
+   .then(function(j){
+     if(!j || j.error){ camLog('注入失败：' + ((j && j.error) || '未知')); return; }
+     camLog('已提交 ' + (j.node || node) + ' · ' + kind + '，等待云手机相机…');
+     camTrack(S.sel, j.node || node);
+   }).catch(function(e){ camLog('出错：' + e); });
+}
+function camLibLoad(){
+  var box = el('camlib');
+  if(!box) return;
+  fetch('/api/cam/files', {cache: 'no-store'})
+   .then(function(r){ return r.json(); })
+   .then(function(j){
+     var files = (j && j.files) || [];
+     box.textContent = '';
+     if(!files.length){
+       var e0 = document.createElement('div'); e0.className = 'mini';
+       e0.textContent = '素材库为空：用上面的“选择图片 / 视频”上传，之后可一键热切。';
+       box.appendChild(e0); return;
+     }
+     files.forEach(function(f){
+       var row = document.createElement('div');
+       row.className = 'camlib-item';
+       var nm = document.createElement('b'); nm.textContent = f.name;
+       var meta = document.createElement('span');
+       meta.textContent = (f.kind === 'video' ? '视频 · ' : '图片 · ') + camLibSize(f.size);
+       row.appendChild(nm); row.appendChild(meta);
+       row.addEventListener('click', function(){ camLibInject(f.path, f.kind); });
+       box.appendChild(row);
+     });
+   }).catch(function(){ box.textContent = '素材库读取失败'; });
 }
 function camTrack(name, node){
   var n = 0;
@@ -2685,6 +2730,7 @@ el('camfile').addEventListener('change', function(){
   el('camfname').textContent = f ? (f.name + ' · ' + Math.round(f.size / 1024) + ' KB') : '未选择文件';
 });
 el('camstart').addEventListener('click', camStartFile);
+el('camlib').addEventListener('click', function(){ if(!el('camlib').children.length) camLibLoad(); });
 el('camstartscreen').addEventListener('click', camStartScreen);
 el('camstarturl').addEventListener('click', camStartURL);
 el('camstop').addEventListener('click', function(){ camStop(false); });
@@ -2805,8 +2851,9 @@ document.getElementById('node').value=node;
 function log(m){ document.getElementById('log').textContent=m; }
 function state(s,on){ document.getElementById('state').textContent=s; var d=document.getElementById('dot'); if(on)d.classList.add('on'); else d.classList.remove('on'); }
 function stopPump(){ if(timer){ clearInterval(timer); timer=null; } }
+function stopJpegEarly(){ try{ if(jpegTimer){ clearInterval(jpegTimer); jpegTimer=null; } jpegBusy=false; }catch(e){} }
 function stopAll(silent){
-  stopPump(); closedByUs=true;
+  stopPump(); stopJpegEarly(); closedByUs=true;
   if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer=null; }
   if(discTimer){ clearTimeout(discTimer); discTimer=null; }
   reconnects=0;
@@ -2873,13 +2920,61 @@ function pump(){
   }catch(e){ log('发送失败：'+e); }
   busy=false;
 }
+// ---- JPEG 降级通道 -------------------------------------------------------
+// WebRTC/WHIP 不可用时（局域网被拦、浏览器不支持、TURN 缺失），把手机画面
+// 转成 640x480 JPEG 走 HTTP POST 给 dashboard，camd 用逐帧 ffmpeg 解码成 YU12。
+var jpegTimer=null, jpegCanvas=null, jpegCtx=null, jpegBusy=false, jpegFrames=0;
+function stopJpeg(){ if(jpegTimer){ clearInterval(jpegTimer); jpegTimer=null; } jpegBusy=false; }
+function jpegPaint(){
+  if(!jpegCanvas){ jpegCanvas=document.createElement("canvas"); jpegCanvas.width=640; jpegCanvas.height=480; jpegCtx=jpegCanvas.getContext("2d"); }
+  var c=jpegCtx; c.fillStyle="#000"; c.fillRect(0,0,640,480);
+  try{
+    var sw=pv.videoWidth, sh=pv.videoHeight;
+    if(sw&&sh){
+      var sc=Math.min(640/sw,480/sh), dw=sw*sc, dh=sh*sc;
+      c.drawImage(pv,(640-dw)/2,(480-dh)/2,dw,dh);
+    }else{ c.fillStyle="#333"; c.fillRect(0,0,640,480); c.fillStyle="#fff"; c.font="bold 30px sans-serif"; c.fillText("等待画面…",232,250); }
+  }catch(e){}
+}
+function startJpegFallback(){
+  stopJpeg(); closedByUs=false;
+  try{ if(pc){ pc.onconnectionstatechange=null; pc.close(); pc=null; } }catch(e){}
+  ph.style.display="none"; startBtn.disabled=true; stopBtn.disabled=false; flipBtn.disabled=false;
+  state("JPEG 通道准备中…",true);
+  log("WebRTC 不可用，切换到 JPEG 低延迟通道（10 fps）…");
+  // 先让 camd 把该节点切到 jpeg 源，再开始喂帧。
+  fetch("/api/cam/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:dev,node:node,path:"webcam",kind:"webcam"})}).catch(function(){});
+  jpegFrames=0;
+  jpegTimer=setInterval(function(){
+    if(jpegBusy) return; jpegBusy=true;
+    jpegPaint();
+    jpegCanvas.toBlob(function(b){
+      if(!b){ jpegBusy=false; return; }
+      fetch("/api/cam/frame?name="+encodeURIComponent(dev)+"&node="+encodeURIComponent(node),
+            {method:"POST",headers:{"Content-Type":"image/jpeg"},body:b})
+       .then(function(r){ return r.json(); })
+       .then(function(j){
+          if(j&&j.ok){ jpegFrames++;
+            if(jpegFrames%10===0){ document.getElementById("frames").textContent=jpegFrames+" 帧"; document.getElementById("bytes").textContent=(jpegFrames*0.02).toFixed(1)+" MB"; }
+          }
+       }).catch(function(){}).then(function(){ jpegBusy=false; });
+    },"image/jpeg",0.72);
+  },120);
+  setTimeout(function(){
+    camStatus(function(j){
+      var st=(j&&j.state)||{};
+      if(st.state==="streaming"){ state("JPEG 推流中 → "+node,true); log("JPEG 通道已激活 → "+node); }
+      else { log("JPEG 帧已开始发送（云手机相机状态："+(st.state||"准备中")+"）"); }
+    });
+  },1800);
+}
 function beginStream(){
   ph.style.display='none'; startBtn.disabled=true; stopBtn.disabled=false; flipBtn.disabled=false;
+  if(q.get('jpeg')==='1'){ startJpegFallback(); return; }
   state('WebRTC 连接中…',true); log('摄像头已打开，正在通过 WebRTC 推流…');
   whipStart().catch(function(e){
-    log('WebRTC 失败，回退到 WS：'+(e&&e.message?e.message:e));
-    try{ if(pc){ pc.onconnectionstatechange=null; pc.close(); pc=null; } }catch(x){}
-    try{ connect(); }catch(x){ log('WS 回退失败：'+x); state('连接失败',false); }
+    log('WebRTC 失败：'+(e&&e.message?e.message:e));
+    startJpegFallback();
   });
 }
 function whipStart(){
@@ -3712,7 +3807,22 @@ def cam_camd_set(node, kind, path=None, timeout=6.0):
 
 
 def cam_camd_kind(kind):
-    return "rtsp" if kind == "stream" else kind
+    if kind == "stream":
+        return "rtsp"
+    if kind == "webcam":
+        return "jpeg"
+    return kind
+
+
+def cam_camd_frame(node, data, timeout=2.0):
+    """把一帧 JPEG 推给 camd 的 jpeg 解码器（浏览器降级通道）。"""
+    req = urllib.request.Request(CAM_CAMD_URL + "/frame?node=" + quote(node), data=data,
+                                 headers={"Content-Type": "image/jpeg"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return bool(json.loads(resp.read().decode("utf-8", "replace")).get("ok"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _cam_producer_pid(node):
@@ -3882,6 +3992,14 @@ def cam_do_start_camd(name, node, path, kind, t0):
             cam_camera_start(name, launch=False)
         cam_camera_start(name, launch=True)
         top = cam_wait_resumed(name, "com.android.camera2/", 6.0) or top
+        # The app needs a moment to actually open the device; checking once
+        # right after 'am start' made every cold start fall into a full camera
+        # stack recovery (~25 s). Poll briefly first.
+        _open_deadline = time.time() + 6.0
+        while time.time() < _open_deadline:
+            if cam_device0_open(name) is True:
+                break
+            time.sleep(0.4)
         if cam_device0_open(name) is not True:
             _alog("cam start(camd) %s: device0 not open after launch, recovering" % name)
             cam_recover(name)
@@ -4576,6 +4694,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": bool(g.get("ok")), "city": g.get("city"), "region": g.get("region"),
                                "ip": g.get("ip"), "iface": g.get("iface"),
                                "lat": g.get("lat"), "lon": g.get("lon"), "error": g.get("error")})
+        if p == "/api/cam/files":
+            items = []
+            try:
+                for fn in sorted(os.listdir(CAM_DIR)):
+                    fp = os.path.join(CAM_DIR, fn)
+                    if not os.path.isfile(fp):
+                        continue
+                    low = fn.lower()
+                    if low.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")):
+                        fk = "image"
+                    elif low.endswith((".mp4", ".webm", ".mkv", ".mov", ".ts", ".avi")):
+                        fk = "video"
+                    else:
+                        continue
+                    stt = os.stat(fp)
+                    items.append({"name": fn, "path": fp, "kind": fk,
+                                  "size": stt.st_size, "mtime": int(stt.st_mtime)})
+            except OSError:
+                items = []
+            items.sort(key=lambda x: -x["mtime"])
+            return self._json({"ok": True, "files": items[:60]})
         if p == "/api/cam/qr":
             name = (qs.get("name") or qs.get("device") or [""])[0]
             if not NAME_RE.match(name or ""):
@@ -4988,6 +5127,23 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._json({"error": "unauthorized"}, 401)
             return self._upload()
+        if p == "/api/cam/frame":
+            # 手机浏览器 WebRTC 不可用时的降级通道：raw JPEG → camd 的 jpeg 解码器。
+            if not self._authed():
+                return self._json({"error": "unauthorized"}, 401)
+            qs = parse_qs(u.query)
+            name = str((qs.get("name") or [""])[0])
+            node = str((qs.get("node") or [""])[0])
+            if not NAME_RE.match(name) or not re.match(r"^/dev/video[0-9]{1,2}$", node):
+                return self._json({"error": "bad args"}, 400)
+            try:
+                n = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                n = 0
+            if n <= 0 or n > 4 * 1024 * 1024:
+                return self._json({"error": "bad length"}, 400)
+            data = self.rfile.read(n)
+            return self._json({"ok": cam_camd_frame(node, data)})
         if p.startswith("/whip/"):
             if not self._authed():
                 return self._json({"error": "unauthorized"}, 401)
@@ -5107,7 +5263,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "bad node"}, 400)
             path = str(body.get("path") or "").strip()
             kind = str(body.get("kind") or "video")
-            if kind == "stream":
+            if kind == "webcam":
+                path = "webcam"
+            elif kind == "stream":
                 if not re.match(r"^(rtsp|rtsps|http|https)://[^\s]{3,500}$", path):
                     return self._json({"error": "bad stream url"}, 400)
             else:

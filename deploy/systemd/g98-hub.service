@@ -1,0 +1,14 @@
+[Unit]
+Description=G98 Cloud Phone hub (dashboard + ops API + web console)
+Wants=docker.service
+After=docker.service network-online.target
+Requires=g98-dashboard.service g98-api.service g98-webconsole.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/bin/systemctl --no-block stop g98-dashboard.service g98-api.service g98-webconsole.service
+
+[Install]
+WantedBy=multi-user.target
