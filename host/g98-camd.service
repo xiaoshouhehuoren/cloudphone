@@ -11,6 +11,10 @@ Environment=G98_CAMD_FPS=30
 # The HAL enqueues requests at the preview rate, so an under-fed node makes the
 # camera service miss its 5s watchdog. Keep idle at full rate.
 Environment=G98_CAMD_IDLE_FPS=30
+# The stock camera app stretches the 640x480 buffer onto a portrait preview
+# surface. On wx1 the buffer lands at 1080x1378, i.e. vertical scale is 1.701x
+# the horizontal scale; pre-compensating keeps circles round on screen.
+Environment=G98_CAMD_YSTRETCH=1.7778
 ExecStartPre=/bin/bash /root/g98-camd-prep.sh
 ExecStart=/usr/bin/python3 /root/g98-camd.py
 # Adopting means restarting the provider inside every container, which can take

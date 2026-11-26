@@ -18,6 +18,7 @@ import faulthandler
 import json
 import os
 import queue
+import re
 import select
 import signal
 import stat
@@ -35,6 +36,18 @@ FPS = int(os.environ.get("G98_CAMD_FPS", "30"))
 START_TIMEOUT = float(os.environ.get("G98_CAMD_START_TIMEOUT", "8"))
 MAX_SILENCE = float(os.environ.get("G98_CAMD_MAX_SILENCE", "10"))
 IDLE_FPS = int(os.environ.get("G98_CAMD_IDLE_FPS", "5"))
+# How a source is fitted into the node's %dx%d frame.  contain = keep the whole
+# picture, black bars; cover = fill the node, crop the overflow; stretch = fill
+# and distort (only for deliberate testing).  rotate/mirror match what a phone
+# camera would do to a portrait recording.
+FIT = os.environ.get("G98_CAMD_FIT", "contain")
+ROTATE = int(os.environ.get("G98_CAMD_ROTATE", "0"))
+MIRROR = os.environ.get("G98_CAMD_MIRROR", "0") == "1"
+# The stock camera app stretches the 640x480 node buffer onto a portrait preview
+# surface (measured on wx1: 640x480 -> 1080x1378, so vertical is 1.70x the
+# horizontal scale).  Pre-compensating in the buffer keeps circles round and
+# faces undistorted on screen.  Set to 1.0 to disable.
+YSTRETCH = float(os.environ.get("G98_CAMD_YSTRETCH", "1.0"))
 FFMPEG = "/root/ffmpeg"
 KEEPF = "/root/keepf"
 STATE_LOCK = threading.Lock()
@@ -74,29 +87,141 @@ def jpeg_cmd():
     return jpeg_one_cmd("/tmp/camd-unused.jpg")
 
 
-def source_cmd(kind, arg):
+def probe_media(path):
+    """Source geometry straight from ffmpeg's banner (no ffprobe on the board).
+
+    The numbers here are what the UI and the verifier compare against the node
+    format and against the camera app's stream configuration.
+    """
+    info = {"width": None, "height": None, "fps": None, "duration": None,
+            "rotation": 0, "codec": None, "pix_fmt": None}
+    if not path or not os.path.exists(path):
+        return info
+    try:
+        res = subprocess.run([FFMPEG, "-hide_banner", "-i", path],
+                             capture_output=True, timeout=8)
+        text = res.stderr.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return info
+    m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", text)
+    if m:
+        info["duration"] = round(int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                                 + float(m.group(3)), 3)
+    m = re.search(r"Video: ([^\n]+)", text)
+    if m:
+        line = m.group(1)
+        info["codec"] = line.split(",")[0].split()[0]
+        mm = re.search(r"(\d{2,5})x(\d{2,5})", line)
+        if mm:
+            info["width"], info["height"] = int(mm.group(1)), int(mm.group(2))
+        mm = re.search(r"([\d.]+) fps", line)
+        if mm:
+            info["fps"] = float(mm.group(1))
+        mm = re.search(r"\b(yuv\w+|nv12|rgb\w*)\b", line)
+        if mm:
+            info["pix_fmt"] = mm.group(1)
+    m = re.search(r"rotate\s*:\s*(-?\d+)", text)
+    if m:
+        info["rotation"] = int(m.group(1)) % 360
+    m = re.search(r"rotation of (-?[\d.]+) degrees", text)
+    if m:
+        info["rotation"] = int(round(float(m.group(1)))) % 360
+    return info
+
+
+def geometry(src, fit=None, rotate=None, mirror=None, ystretch=None):
+    """Expected picture rect inside the node frame, for the given fit mode.
+
+    ystretch = (screen px per buffer row) / (screen px per buffer column).  The
+    app does not keep the buffer aspect, so the buffer content is composed for
+    the *displayed* aspect: a_source * ystretch.
+    """
+    fit = (fit or FIT).lower()
+    rotate = int(rotate if rotate is not None else ROTATE) % 360
+    mirror = MIRROR if mirror is None else bool(mirror)
+    ys = YSTRETCH if ystretch is None else float(ystretch)
+    sw = int(src.get("width") or W)
+    sh = int(src.get("height") or H)
+    dw, dh = (sh, sw) if rotate in (90, 270) else (sw, sh)
+    src_dar = dw / float(dh)
+    want = src_dar * ys          # aspect the buffer content needs to have
+    if fit == "stretch":
+        cw, ch = W, H
+    elif fit == "cover":
+        if want >= W / float(H):
+            ch, cw = H, round(H * want)
+        else:
+            cw, ch = W, round(W / want)
+        cw, ch = max(W, cw), max(H, ch)
+    else:
+        if want >= W / float(H):
+            cw, ch = W, round(W / want)
+        else:
+            ch, cw = H, round(H * want)
+        cw, ch = min(W, cw), min(H, ch)
+    cw, ch = max(2, cw - cw % 2), max(2, ch - ch % 2)
+    return {
+        "fit": fit,
+        "ystretch": round(ys, 4),
+        "rotate": rotate,
+        "mirror": bool(mirror),
+        "src_w": sw, "src_h": sh,
+        "disp_w": dw, "disp_h": dh,
+        "out_w": W, "out_h": H,
+        "content_w": cw, "content_h": ch,
+        "content_x": (W - cw) // 2,
+        "content_y": (H - ch) // 2,
+        "src_dar": round(src_dar, 4),
+        "content_dar": round(cw / float(ch), 4),
+        "display_dar": round(cw / float(ch) / ys, 4),
+    }
+
+
+def build_vf(geo, fps=None):
+    chain = []
+    rot = geo["rotate"]
+    if rot == 90:
+        chain.append("transpose=1")
+    elif rot == 180:
+        chain.append("transpose=2,transpose=2")
+    elif rot == 270:
+        chain.append("transpose=2")
+    if geo["mirror"]:
+        chain.append("hflip")
+    if geo["fit"] == "stretch":
+        chain.append("scale=%d:%d" % (W, H))
+    elif geo["fit"] == "cover":
+        # Cover scales past the frame and crops the overflow: the rawvideo
+        # stream must stay exactly WxH or the writer reads misaligned frames.
+        chain.append("scale=%d:%d" % (geo["content_w"], geo["content_h"]))
+        chain.append("crop=%d:%d:%d:%d"
+                     % (W, H, -geo["content_x"], -geo["content_y"]))
+    else:
+        # Exact content rect: with pre-compensation this is not an
+        # aspect-preserving fit, so the verifier compares pixels directly.
+        chain.append("scale=%d:%d" % (geo["content_w"], geo["content_h"]))
+        chain.append("pad=%d:%d:%d:%d:color=black"
+                     % (W, H, geo["content_x"], geo["content_y"]))
+    if fps:
+        chain.append("fps=%d" % fps)
+    chain.append("format=yuv420p")
+    return ",".join(chain)
+
+
+def source_cmd(kind, arg, geo, fps=None):
     if kind == "jpeg":
         return jpeg_one_cmd("/tmp/camd-unused.jpg")
     if kind == "image":
         return [FFMPEG, "-hide_banner", "-loglevel", "error", "-re",
-                "-loop", "1", "-i", arg,
-                "-vf", "scale=%d:%d:force_original_aspect_ratio=decrease,"
-                       "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p"
-                       % (W, H, W, H),
+                "-loop", "1", "-i", arg, "-vf", build_vf(geo),
                 "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     if kind == "video":
         return [FFMPEG, "-hide_banner", "-loglevel", "error", "-re",
-                "-stream_loop", "-1", "-i", arg,
-                "-vf", "scale=%d:%d:force_original_aspect_ratio=decrease,"
-                       "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,fps=%d,format=yuv420p"
-                       % (W, H, W, H, FPS),
+                "-stream_loop", "-1", "-i", arg, "-vf", build_vf(geo, fps or FPS),
                 "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     if kind == "rtsp":
         return [FFMPEG, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
-                "-i", arg,
-                "-vf", "scale=%d:%d:force_original_aspect_ratio=decrease,"
-                       "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,fps=%d,format=yuv420p"
-                       % (W, H, W, H, FPS),
+                "-i", arg, "-vf", build_vf(geo, fps or FPS),
                 "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     raise ValueError("bad kind " + kind)
 
@@ -104,11 +229,12 @@ def source_cmd(kind, arg):
 class Reader(threading.Thread):
     """Runs one ffmpeg source and publishes complete frames."""
 
-    def __init__(self, node, kind, arg, on_frame):
+    def __init__(self, node, kind, arg, on_frame, geo=None):
         super().__init__(daemon=True)
         self.node = node
         self.kind = kind
         self.arg = arg
+        self.geo = geo or geometry({})
         self.on_frame = on_frame
         self.proc = None
         self.stop = threading.Event()
@@ -173,7 +299,7 @@ class Reader(threading.Thread):
                 time.sleep(0.05)
             if self.stop.is_set():
                 return
-        cmd = idle_cmd(self.node) if self.kind == "idle" else source_cmd(self.kind, self.arg)
+        cmd = idle_cmd(self.node) if self.kind == "idle" else source_cmd(self.kind, self.arg, self.geo)
         print("camd: reader spawn %s %s" % (self.node, " ".join(cmd[-6:])), flush=True)
         try:
             errsink = open("/tmp/camd-jpeg.err", "ab") if self.kind == "jpeg" else subprocess.DEVNULL
@@ -332,6 +458,15 @@ class NodeRouter:
         self.written = 0
         self.errors = 0
         self.consecutive_errors = 0
+        # Source geometry from ffmpeg plus the rect the picture occupies inside
+        # the node frame; the dashboard shows it and tests compare it with the
+        # node format and the camera app's stream size.
+        self.src = {}
+        self.fit = FIT
+        self.rotate = ROTATE
+        self.mirror = MIRROR
+        self.ystretch = YSTRETCH
+        self.geo = geometry({}, self.fit, self.rotate, self.mirror, self.ystretch)
         self.stop = threading.Event()
         self.writer = threading.Thread(target=self._write_loop, daemon=True)
         self.writer.start()
@@ -398,10 +533,18 @@ class NodeRouter:
             self.frame = frame
             self.seq += 1
 
-    def set_source(self, kind, arg):
+    def set_source(self, kind, arg, fit=None, rotate=None, mirror=None,
+                   ystretch=None):
+        src = probe_media(arg) if kind in ("image", "video") else {}
+        fit = (fit or self.fit or FIT)
+        rotate = self.rotate if rotate is None else int(rotate)
+        mirror = self.mirror if mirror is None else bool(mirror)
+        self.ystretch = YSTRETCH if ystretch is None else float(ystretch)
+        geo = geometry(src, fit, rotate, mirror, self.ystretch)
         with self.lock:
             old, old_dec = self.reader, self.decoder
             self.kind, self.arg, self.since = kind, arg, time.time()
+            self.src, self.geo, self.fit, self.rotate, self.mirror = src, geo, fit, rotate, mirror
         for obj in (old, old_dec):
             if obj is not None:
                 obj.stop.set()
@@ -413,7 +556,7 @@ class NodeRouter:
                 self.reader, self.decoder = None, dec
             dec.start()
             return dec
-        reader = Reader(self.node, kind, arg, self._on_frame)
+        reader = Reader(self.node, kind, arg, self._on_frame, self.geo)
         with self.lock:
             self.reader, self.decoder = reader, None
         reader.start()
@@ -431,6 +574,8 @@ class NodeRouter:
                 "node": self.node,
                 "kind": self.kind,
                 "arg": self.arg,
+                "src": self.src,
+                "geometry": self.geo,
                 "frames": self.seq,
                 "written": self.written,
                 "errors": self.errors,
@@ -521,7 +666,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"error": "bad jpeg tag"}, 400)
             return
         try:
-            router.set_source(kind, arg)
+            router.set_source(kind, arg, fit=body.get("fit"),
+                              rotate=body.get("rotate"), mirror=body.get("mirror"),
+                              ystretch=body.get("ystretch"))
         except Exception as exc:  # noqa: BLE001
             self._send({"error": str(exc)}, 400)
             return

@@ -23,6 +23,17 @@ say "dashboard material library API"
 say "camera end-to-end (wx1..wx5)"
 python3 verify_camera_e2e.py "$@" || FAIL=1
 
+say "geometry chain (source -> node -> stream -> screen)"
+GEOM_MEDIA="${GEOM_MEDIA:-/root/camin/1795581891716.mp4}"
+if [ -f "$GEOM_MEDIA" ]; then
+    python3 verify_geometry.py wx1 /dev/video20 "$GEOM_MEDIA" contain 1.7778 || FAIL=1
+    python3 verify_geometry.py wx1 /dev/video20 "$GEOM_MEDIA" cover 1.7778 || FAIL=1
+else
+    echo "skip: $GEOM_MEDIA not found"
+fi
+/usr/bin/curl -s -X POST http://127.0.0.1:8100/set -H 'Content-Type: application/json' \
+    -d '{"node":"/dev/video20","kind":"idle"}' >/dev/null
+
 say "result"
 [ "$FAIL" = 0 ] && echo "REGRESSION PASS" || echo "REGRESSION FAIL"
 exit "$FAIL"

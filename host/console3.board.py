@@ -1490,6 +1490,19 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
           <option value="/dev/video11">/dev/video11 · 前置</option>
           <option value="/dev/video10">/dev/video10 · 后置</option>
         </select>
+        <label class="mini">画面适配（按源比例补偿预览拉伸）</label>
+        <select id="camfit">
+          <option value="contain">完整显示（补黑边，默认）</option>
+          <option value="cover">铺满裁切（不变形）</option>
+          <option value="stretch">拉伸铺满（会变形）</option>
+        </select>
+        <label class="mini">旋转</label>
+        <select id="camrot">
+          <option value="0">不旋转</option>
+          <option value="90">顺时针 90°</option>
+          <option value="180">180°</option>
+          <option value="270">顺时针 270°</option>
+        </select>
         <label class="mini">图片 / 视频文件（上传到板子，约 15fps）</label>
         <div class="camfile-row">
           <label class="filepick" for="camfile">选择图片 / 视频</label>
@@ -2510,6 +2523,22 @@ function camStartWS(){
     }
   };
   camWS.onclose = function(){ camLog('相机连接已关闭'); };
+}
+function camFitOpts(){
+  var fitEl=el('camfit'), rotEl=el('camrot');
+  var o={fit: fitEl?fitEl.value:'contain'};
+  if(rotEl) o.rotate=parseInt(rotEl.value,10)||0;
+  return o;
+}
+function camGeomShow(node){
+  if(!S.sel) return;
+  post('/api/cam/geom', {name:S.sel, node:node||''}).then(function(j){
+    var g=j&&j.geometry;
+    if(!g){ camLog('几何信息不可用（camd 未接管该节点）'); return; }
+    camLog('几何：源 '+g.src_w+'×'+g.src_h+' → 节点 '+g.out_w+'×'+g.out_h+
+           ' · 内容 '+g.content_w+'×'+g.content_h+' @('+g.content_x+','+g.content_y+
+           ') · 显示比 '+g.display_dar+'（源 '+g.src_dar+'，补偿 ×'+g.ystretch+'）');
+  }).catch(function(){});
 }
 function camStartFile(){
   if(!S.sel){ camLog('先选一台实例'); return; }
@@ -3799,11 +3828,28 @@ def cam_camd_nodes():
         return {}
 
 
-def cam_camd_set(node, kind, path=None, timeout=6.0):
+def cam_camd_set(node, kind, path=None, timeout=6.0, geom=None):
     payload = {"node": node, "kind": kind}
     if path:
         payload["path" if kind in ("image", "video") else "url"] = path
+    if geom:
+        for key in ("fit", "rotate", "mirror", "ystretch"):
+            if geom.get(key) is not None:
+                payload[key] = geom[key]
     return cam_camd_call("/set", payload, timeout=timeout)
+
+
+def cam_camd_node_state(node, timeout=4.0):
+    """Return camd's snapshot for one node (geometry, source, counters)."""
+    try:
+        with urllib.request.urlopen(CAM_CAMD_URL + "/state", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001
+        return None
+    for item in data.get("nodes") or []:
+        if item.get("node") == node:
+            return item
+    return None
 
 
 def cam_camd_kind(kind):
@@ -3970,7 +4016,7 @@ def cam_submit(name, kind, fn):
     return True
 
 
-def cam_do_start_camd(name, node, path, kind, t0):
+def cam_do_start_camd(name, node, path, kind, t0, geom=None):
     """camd 常驻帧路由：只换源，不重启 CameraProvider，也不杀 Camera App。
 
     只有在没人看相机（App 没开、也没有微信之类在扫码）时才需要把相机拉起来；
@@ -3978,7 +4024,7 @@ def cam_do_start_camd(name, node, path, kind, t0):
     "Camera error: Can't connect to the camera." 对话框，而状态里却写着 streaming。
     """
     cam_idle("stop")
-    cam_camd_set(node, cam_camd_kind(kind), path)
+    cam_camd_set(node, cam_camd_kind(kind), path, geom=geom)
     cam_keepf(node, 1)
     t1 = time.time()
     top = cam_top_activity(name)
@@ -4022,11 +4068,11 @@ def cam_do_start_camd(name, node, path, kind, t0):
     return st
 
 
-def cam_do_start(name, node, path, kind):
+def cam_do_start(name, node, path, kind, geom=None):
     with CAM_SEQ:
         t0 = time.time()
         if cam_camd_health():
-            return cam_do_start_camd(name, node, path, kind, t0)
+            return cam_do_start_camd(name, node, path, kind, t0, geom=geom)
         top = cam_top_activity(name)
         # WebRTC 重连时不要重启 CameraProvider/Camera App；重启会让已有 client
         # 重新取流，恰好造成“每次有信号就重启、只看到一秒后卡住”。
@@ -5273,7 +5319,24 @@ class Handler(BaseHTTPRequestHandler):
                 if not (path.startswith(CAM_DIR + "/") and os.path.exists(path)):
                     return self._json({"error": "bad path"}, 400)
             node = cam_norm_node(name, requested) if requested else cam_active_node(name)
-            if not cam_submit(name, "start", lambda: cam_do_start(name, node, path, kind)):
+            geom = {}
+            fit = str(body.get("fit") or "").strip().lower()
+            if fit in ("contain", "cover", "stretch"):
+                geom["fit"] = fit
+            try:
+                if int(body.get("rotate") or 0) in (0, 90, 180, 270):
+                    geom["rotate"] = int(body.get("rotate") or 0)
+            except (TypeError, ValueError):
+                pass
+            if body.get("mirror") is not None:
+                geom["mirror"] = bool(body.get("mirror"))
+            try:
+                ys = float(body.get("ystretch") or 0)
+                if 0.5 <= ys <= 3.0:
+                    geom["ystretch"] = round(ys, 4)
+            except (TypeError, ValueError):
+                pass
+            if not cam_submit(name, "start", lambda: cam_do_start(name, node, path, kind, geom)):
                 return self._json({"ok": False, "queued": False, "error": "上一个摄像头操作还没结束",
                                    "state": cam_state(name)}, 409)
             return self._json({"ok": True, "queued": True, "node": node, "kind": kind,
@@ -5290,6 +5353,15 @@ class Handler(BaseHTTPRequestHandler):
                                "state": cam_state(name)})
         if p == "/api/cam/status":
             return self._json({"ok": True, "state": cam_state(name), "busy": cam_busy(name)})
+        if p == "/api/cam/geom":
+            node = cam_norm_node(name, str(body.get("node") or "").strip()) \
+                if body.get("node") else cam_active_node(name)
+            snap = cam_camd_node_state(node) or {}
+            return self._json({"ok": True, "node": node,
+                               "geometry": snap.get("geometry"),
+                               "src": snap.get("src"),
+                               "kind": snap.get("kind"),
+                               "source_frames": snap.get("source_frames")})
         if p == "/api/rtc/start":
             try:
                 info = rtc_start(name)
