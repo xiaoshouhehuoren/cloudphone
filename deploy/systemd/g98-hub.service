@@ -7,7 +7,7 @@ Requires=g98-dashboard.service g98-api.service g98-webconsole.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/true
+ExecStart=/bin/systemctl --no-block start g98-dashboard.service g98-api.service g98-webconsole.service
 ExecStop=/bin/systemctl --no-block stop g98-dashboard.service g98-api.service g98-webconsole.service
 
 [Install]
