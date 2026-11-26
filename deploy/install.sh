@@ -15,6 +15,8 @@ install -m 755 "$HERE/../host/g98-camd.py"       /root/g98-camd.py
 install -m 755 "$HERE/../host/g98-camd-prep.sh"  /root/g98-camd-prep.sh
 install -m 755 "$HERE/../host/g98-camd-adopt.sh" /root/g98-camd-adopt.sh
 install -m 755 "$HERE/../host/console3.board.py" /root/console3.py
+install -m 755 "$HERE/../host/g98-netup.sh"     /root/g98-netup.sh
+install -m 755 "$HERE/../host/g98-netup-all.sh" /root/g98-netup-all.sh
 
 systemctl daemon-reload
 
