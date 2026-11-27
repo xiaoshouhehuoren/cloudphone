@@ -3011,7 +3011,7 @@ var node=q.get('node')||'/dev/video10';
 var pv=document.getElementById('pv'), ph=document.getElementById('ph');
 var canvas=document.createElement('canvas'); canvas.width=480; canvas.height=360;
 var ctx=canvas.getContext('2d',{willReadFrequently:true});
-var stream=null, ws=null, pc=null, videoSender=null, timer=null, whipTimer=null, whipStats=null, camStarted=false, frames=0, bytes=0, busy=false, facing='environment', closedByUs=false;
+var stream=null, ws=null, pc=null, videoSender=null, timer=null, whipTimer=null, whipStats=null, camStarted=false, frames=0, bytes=0, busy=false, facing=(q.get('facing')==='user'?'user':'environment'), closedByUs=false;
 var reconnects=0, reconnectTimer=null, discTimer=null;
 var startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop'), flipBtn=document.getElementById('flip');
 document.getElementById('dev').textContent=dev;
@@ -3713,7 +3713,7 @@ function camNode(){return camNodeFor(DEV,CAM.node);}
 function camNodeFor(dev,which){var n=parseInt(String(dev).replace(/[^0-9]/g,''),10)||1;var base=20+2*(n-1);return '/dev/video'+(which==='front'?base+1:base);}
 function camStatus(el,msg,cls){if(!el)return;el.textContent=msg;el.className='camstat'+(cls?' '+cls:'');}
 function camSheetTab(name){document.querySelectorAll('.camtab button').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-tab')===name)});['live','image','video'].forEach(function(k){document.getElementById('pane-'+k).classList.toggle('on',k===name)});}
-function camUrl(){return '/cam?device='+encodeURIComponent(DEV)+'&node='+encodeURIComponent(camNode())+'&auto=1'+(K?'&k='+encodeURIComponent(K):'')+(new URLSearchParams(location.search).get('test')==='1'?'&test=1':'')+(new URLSearchParams(location.search).get('jpeg')==='1'?'&jpeg=1':'');}
+function camUrl(){return '/cam?device='+encodeURIComponent(DEV)+'&node='+encodeURIComponent(camNode())+'&facing='+(CAM.node==='front'?'user':'environment')+'&auto=1'+(K?'&k='+encodeURIComponent(K):'')+(new URLSearchParams(location.search).get('test')==='1'?'&test=1':'')+(new URLSearchParams(location.search).get('jpeg')==='1'?'&jpeg=1':'');}
 function camOpen(){var f=document.getElementById('camframe');var u=camUrl();if(CAM.url!==u){f.src=u;CAM.url=u;}f.classList.add('show');document.getElementById('camlink').href=u;var s=document.getElementById('camsheet');s.classList.remove('park');openSheet('camsheet');cfgPoll();}
 /* 只收起面板，不销毁 iframe：手机摄像头的 WHIP 推流、传感器同步都活在 iframe 里，
    src 一清就全停了。要真的停，用面板里的「恢复空闲」。 */
