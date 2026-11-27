@@ -64,6 +64,32 @@ def idle_cmd(node):
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
 
 
+def render_static(cmd):
+    """Render ONE frame to a raw YU12 buffer for the static (idle/image) kinds.
+
+    A 30 fps ffmpeg per node costs up to half a core: for a picture that never
+    changes we decode it once and let the writer thread repeat the same 460800
+    byte buffer.  The node still gets fed at full rate, which is what the camera
+    HAL's 5 second watchdog needs.
+    """
+    args = list(cmd)
+    if args and args[-1] == "-":
+        args = args[:-1] + ["-frames:v", "1", "-"]
+    else:
+        args = args + ["-frames:v", "1"]
+    try:
+        res = subprocess.run(args, capture_output=True, timeout=25)
+    except Exception as exc:  # noqa: BLE001
+        print("camd: render_static failed: %s" % exc, flush=True)
+        return None
+    data = res.stdout
+    if len(data) < FRAME_SIZE:
+        print("camd: render_static short frame %d/%d" % (len(data), FRAME_SIZE),
+              flush=True)
+        return None
+    return data[:FRAME_SIZE]
+
+
 def jpeg_vf():
     return ("scale=%d:%d:force_original_aspect_ratio=decrease,"
             "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p"
@@ -448,6 +474,7 @@ class NodeRouter:
         self.node = node
         self.lock = threading.Lock()
         self.frame = None
+        self.static = None
         self.seq = 0
         self.kind = None
         self.arg = None
@@ -485,7 +512,7 @@ class NodeRouter:
         while not self.stop.is_set():
             t0 = time.time()
             with self.lock:
-                frame = self.frame
+                frame = self.static or self.frame
                 kind = self.kind
             if frame is not None:
                 try:
@@ -523,7 +550,11 @@ class NodeRouter:
                         time.sleep(0.5)
             # An idle card only has to keep the node's format alive; pushing it at
             # the full source rate burns a core per node for nothing.
-            period = 1.0 / (IDLE_FPS if kind == "idle" else FPS)
+            # 静态帧（idle/image）重复写很便宜，按满速喂节点；只有视频/RTSP 用
+            # IDLE_FPS 降频是没有意义的，所以这里只对非静态源保留原逻辑。
+            with self.lock:
+                is_static = self.static is not None
+            period = 1.0 / (FPS if (is_static or kind != "idle") else IDLE_FPS)
             dt = period - (time.time() - t0)
             if dt > 0:
                 time.sleep(dt)
@@ -550,6 +581,19 @@ class NodeRouter:
                 obj.stop.set()
                 if getattr(obj, "proc", None) is not None and obj.proc.poll() is None:
                     obj.proc.terminate()
+        if kind in ("idle", "image"):
+            # 静态源：只解码一帧，写线程原样重复，省掉每节点一个常驻 ffmpeg。
+            cmd = idle_cmd(self.node) if kind == "idle" else source_cmd(
+                "image", arg, self.geo)
+            frame = render_static(cmd)
+            with self.lock:
+                self.static = frame if frame is not None else self.static
+                if frame is not None:
+                    self.frame = frame
+                    self.seq += 1
+            return None
+        with self.lock:
+            self.static = None
         if kind == "jpeg":
             dec = JpegDecoder(self.node, self._on_frame)
             with self.lock:
