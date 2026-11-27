@@ -783,6 +783,8 @@ def rtc_active():
 
 
 RTC_IDLE_TIMEOUT = float(os.environ.get("G98_RTC_IDLE_TIMEOUT", "45"))
+# 起流后一直没人 WHEP 进来（页面在瞎重试）时，等待上限要比正常心跳超时短。
+RTC_FIRST_VIEW = float(os.environ.get("G98_RTC_FIRST_VIEW", "15"))
 
 
 def rtc_reap_idle(now=None):
@@ -792,7 +794,10 @@ def rtc_reap_idle(now=None):
     with RTC_LOCK:
         for name, st in list(RTC_SESSIONS.items()):
             ref = max(getattr(st, "last_view", 0.0), getattr(st, "started_at", 0.0))
-            if now - ref > RTC_IDLE_TIMEOUT or not st.alive():
+            # 从来没被观看过（WHEP 客户端一次都没成功）的会话只给 RTC_FIRST_VIEW
+            # 秒：有的页面会不停重试 start，若按 45s 回收就会在后台一直编码。
+            grace = RTC_FIRST_VIEW if not getattr(st, "viewed", False) else RTC_IDLE_TIMEOUT
+            if now - ref > grace or not st.alive():
                 RTC_SESSIONS.pop(name, None)
                 victims.append((name, st, round(now - ref, 1)))
     for name, st, age in victims:
@@ -5438,6 +5443,7 @@ class Handler(BaseHTTPRequestHandler):
                 st = RTC_SESSIONS.get(name)
             if st is not None:
                 st.last_view = time.time()
+            st.viewed = True
             RTC_STARTS.pop(name, None)
         try:
             self.send_response(code)

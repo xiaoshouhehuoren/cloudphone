@@ -1,0 +1,11 @@
+[Unit]
+Description=g98 page cache / ART cache trim
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/g98-trim.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

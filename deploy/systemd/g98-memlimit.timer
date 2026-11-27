@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-apply g98 container memory ceilings (containers restart)
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

@@ -12,7 +12,9 @@ MODEL=2211133C; DEVICE=fuxi; NAME=fuxi; FLAVOR=fuxi-user
 FP=Xiaomi/fuxi/fuxi:13/TKQ1.221114.001/V14.0.9.0.TMCCNXM:user/release-keys
 create() {
   mkdir -p "/srv/redroid/$C"
-  docker run -d --name "$C" --hostname "$C" --privileged --security-opt label=disable --cap-add SYS_NICE --entrypoint /init --mac-address "$M" -v "/srv/redroid/$C:/data" --device /dev/dri "$IMG" \
+  # 内存上限：软线由 g98-memlimit.timer 每 5 分钟写 memory.high=2G；
+  # 这里给 docker 一个硬上界（3G + 1G swap），防止单实例把整板拖进 OOM。
+  docker run -d --name "$C" --hostname "$C" --privileged --security-opt label=disable --cap-add SYS_NICE --entrypoint /init --mac-address "$M" -v "/srv/redroid/$C:/data" --device /dev/dri --memory 3g --memory-swap 4g "$IMG" \
     qemu=1 androidboot.hardware=mt6983 \
     androidboot.redroid_width="$W" androidboot.redroid_height="$H" androidboot.redroid_dpi="$DPI" androidboot.redroid_fps="$FPS" \
     androidboot.verifiedbootstate=green androidboot.flash.locked=1 androidboot.veritymode=enforcing androidboot.selinux=enforcing \

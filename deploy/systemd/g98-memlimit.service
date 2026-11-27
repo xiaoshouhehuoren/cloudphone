@@ -1,0 +1,12 @@
+[Unit]
+Description=g98 container memory ceiling (memory.high/soft limit per wxN)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/g98-memlimit.sh
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
