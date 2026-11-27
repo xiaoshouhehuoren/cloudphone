@@ -1,0 +1,11 @@
+service g98-sensors /vendor/bin/g98-sensors.sh
+    user root
+    group root system
+    disabled
+
+# 不能在 "on boot" 阶段启动：假传感器 HAL 的 FMQ 事件包格式不完整，SensorService
+# 会一直 "FMQ: The write or read pointer has become misaligned"，system_server 卡在
+# 启动阶段，boot_completed 永远为空，PackageManager 解析不出任何 Activity（相机 App
+# 直接报 "Activity class does not exist"）。等开机完成后再启动就只影响传感器本身。
+on property:sys.boot_completed=1
+    start g98-sensors

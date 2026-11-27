@@ -17,6 +17,8 @@ install -m 755 "$HERE/../host/g98-camd-adopt.sh" /root/g98-camd-adopt.sh
 install -m 755 "$HERE/../host/console3.board.py" /root/console3.py
 install -m 755 "$HERE/../host/g98-netup.sh"     /root/g98-netup.sh
 install -m 755 "$HERE/../host/g98-netup-all.sh" /root/g98-netup-all.sh
+install -m 644 "$HERE/tmpfiles-g98-video.conf" /etc/tmpfiles.d/g98-video.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/g98-video.conf 2>/dev/null || true
 
 systemctl daemon-reload
 

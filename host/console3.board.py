@@ -3988,9 +3988,32 @@ def cam_state_set(name, **kw):
         return dict(cur)
 
 
+# 一个动作要串很多 docker exec，容器卡住时线程可能长时间不返回。没有看门狗时
+# CAM_TASKS 里留着一个活着的线程，后续所有 /api/cam/start 都直接 409，页面
+# 永远停在"正在切换"。超过 CAM_TASK_MAX 秒视为失效，允许新动作接管。
+CAM_TASK_MAX = float(os.environ.get("G98_CAM_TASK_MAX", "75"))
+
+
+def cam_task_alive(name):
+    ent = CAM_TASKS.get(name)
+    if not ent:
+        return False
+    th = ent.get("th")
+    age = time.time() - float(ent.get("t0") or 0.0)
+    return bool(th and th.is_alive() and age < CAM_TASK_MAX)
+
+
 def cam_busy(name):
-    th = CAM_TASKS.get(name)
-    return bool(th and th.is_alive())
+    if cam_task_alive(name):
+        return True
+    ent = CAM_TASKS.get(name)
+    if ent:
+        with CAM_STATE_LOCK:
+            CAM_TASKS.pop(name, None)
+        cam_state_set(name, state="error", error="上一次动作超时（%ds）" % int(CAM_TASK_MAX))
+        _alog("cam %s %s stale task cleared after %.1fs" % (
+            ent.get("kind"), name, time.time() - float(ent.get("t0") or 0.0)))
+    return False
 
 
 def cam_submit(name, kind, fn):
@@ -4010,11 +4033,13 @@ def cam_submit(name, kind, fn):
             _alog("cam %s %s failed %.1fs %s" % (kind, name, time.time() - t0, str(exc)[:160]))
         finally:
             with CAM_STATE_LOCK:
-                CAM_TASKS.pop(name, None)
+                ent = CAM_TASKS.get(name)
+                if ent and ent.get("th") is th:
+                    CAM_TASKS.pop(name, None)
 
     th = threading.Thread(target=_run, name="cam-%s-%s" % (kind, name), daemon=True)
     with CAM_STATE_LOCK:
-        CAM_TASKS[name] = th
+        CAM_TASKS[name] = {"th": th, "t0": time.time(), "kind": kind}
     th.start()
     return True
 
@@ -4044,7 +4069,7 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
         # The app needs a moment to actually open the device; checking once
         # right after 'am start' made every cold start fall into a full camera
         # stack recovery (~25 s). Poll briefly first.
-        _open_deadline = time.time() + 6.0
+        _open_deadline = time.time() + 10.0
         while time.time() < _open_deadline:
             if cam_device0_open(name) is True:
                 break

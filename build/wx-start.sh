@@ -28,6 +28,10 @@ ensure_sensors() {
   local A=/root/artifacts
   [ -f "$A/g98-sensors.dex" ] || return 0
   if docker exec "$C" test -f /vendor/etc/g98-sensors.dex 2>/dev/null; then
+    # 已装过的实例也刷新 init rc：新版 rc 把启动时机从 "on boot" 改成
+    # "on property:sys.boot_completed=1"，否则假 HAL 会在开机阶段把 system_server 卡住。
+    docker cp "$A/g98-sensors.rc" "$C:/vendor/etc/init/g98-sensors.rc" >/dev/null 2>&1 || true
+    docker cp "$A/g98-sensors.sh" "$C:/vendor/bin/g98-sensors.sh" >/dev/null 2>&1 || true
     return 0
   fi
   docker cp "$A/g98-sensors.dex" "$C:/vendor/etc/g98-sensors.dex" >/dev/null 2>&1 || return 0
@@ -35,6 +39,9 @@ ensure_sensors() {
   docker cp "$A/g98-sensors.sh" "$C:/vendor/bin/g98-sensors.sh" >/dev/null 2>&1 || true
   [ -f "$A/g98_sensors_trace.bin.gz" ] && docker cp "$A/g98_sensors_trace.bin.gz" "$C:/vendor/etc/g98_sensors_trace.bin.gz" >/dev/null 2>&1 || true
   [ -f "$A/vintf-manifest.xml" ] && docker cp "$A/vintf-manifest.xml" "$C:/vendor/etc/vintf/manifest.xml" >/dev/null 2>&1 || true
+  # 只保留 sensors 的 AIDL 声明：声明了 gnss 却没人提供 IGnss 时 servicemanager 会
+  # 每秒重试，system_server 卡在启动，boot_completed 永远为空。
+  docker exec "$C" sh -c "if [ -f /vendor/etc/vintf/manifest.xml ] && grep -q android.hardware.gnss /vendor/etc/vintf/manifest.xml; then grep -v android.hardware.gnss /vendor/etc/vintf/manifest.xml > /data/local/tmp/m.xml && cat /data/local/tmp/m.xml > /vendor/etc/vintf/manifest.xml; fi" >/dev/null 2>&1 || true
   echo "$C: sensor stack installed, restarting to load it" >> /var/log/g98-wx-start.log
   docker restart "$C" >/dev/null 2>&1 || true
   local i

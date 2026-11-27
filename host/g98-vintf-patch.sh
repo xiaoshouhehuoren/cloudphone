@@ -12,8 +12,11 @@ fi
 T=/data/local/tmp/manifest.xml.g98
 /system/bin/awk '{
   if ($0 ~ /<\/manifest>/) {
+    # 只声明 sensors。声明 gnss 但容器里没有对应 HAL 时 servicemanager 会一直
+    # "Waited one second for android.hardware.gnss.IGnss/default"，system_server 卡在
+    # 启动阶段（boot_completed 永远为空），PackageManager 解析不出 Activity，
+    # 相机 App 就报 "Activity class does not exist"。
     print "  <hal format=\"aidl\"><name>android.hardware.sensors</name><version>1</version><interface><name>ISensors</name><instance>default</instance></interface></hal>"
-    print "  <hal format=\"aidl\"><name>android.hardware.gnss</name><version>2</version><interface><name>IGnss</name><instance>default</instance></interface></hal>"
   }
   print
 }' "$M" > "$T" || exit 1

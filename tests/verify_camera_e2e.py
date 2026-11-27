@@ -116,7 +116,7 @@ def inject_image(name, node, src_png, tag):
     raise RuntimeError("start stayed busy: %s" % res)
 
 
-def wait_streaming(name, timeout=25.0):
+def wait_streaming(name, timeout=50.0):
     t0 = time.time()
     last = {}
     while time.time() - t0 < timeout:

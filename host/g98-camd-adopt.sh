@@ -9,6 +9,8 @@ for c in $(/usr/bin/docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^wx[0
   bp=$((20 + 2 * (n - 1)))
   fp=$((bp + 1))
   /usr/bin/docker exec "$c" setprop vendor.camera.redroid.nodes "/dev/video$bp,/dev/video$fp" >/dev/null 2>&1 || true
+  # 容器内 chmod 对共享的 devtmpfs 节点不一定生效，宿主机这边做才可靠。
+  chmod 666 "/dev/video$bp" "/dev/video$fp" >/dev/null 2>&1 || true
   /usr/bin/docker exec "$c" chmod 666 "/dev/video$bp" "/dev/video$fp" >/dev/null 2>&1 || true
   # 残留的 Camera error 对话框会让下一次打开立刻失败，先清掉相机 App。
   /usr/bin/docker exec "$c" am force-stop com.android.camera2 >/dev/null 2>&1 || true

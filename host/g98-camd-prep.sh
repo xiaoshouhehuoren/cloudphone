@@ -34,9 +34,11 @@ for n in 20 21 22 23 24 25 26 27 28 29 30 31; do
     mj=$(cut -d: -f1 "$sysfs/dev")
     mn=$(cut -d: -f2 "$sysfs/dev")
     mknod "/dev/video$n" c "$mj" "$mn" 2>/dev/null || true
-    chmod 666 "/dev/video$n" 2>/dev/null || true
     echo "g98-camd-prep: repaired /dev/video$n ($mj:$mn)"
   fi
+  # devtmpfs 新建的节点默认 0600：容器里（privileged，共享宿主 /dev）打开会 EACCES，
+  # 表现就是 Camera 卡在 starting、e2e 超时。每次 camd 启动都统一放开。
+  chmod 666 "/dev/video$n" 2>/dev/null || true
 done
 
 systemctl stop g98-camidle 2>/dev/null || true

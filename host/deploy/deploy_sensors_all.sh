@@ -11,9 +11,12 @@ START="$HERE/../g98-sensors-start.sh"
 fail=0
 for c in $(docker ps --format '{{.Names}}' | grep -E '^wx[0-9]+$'); do
   printf '== %s ' "$c"
-  for f in g98-sensors.dex g98-sensors.rc; do :; done
+  # rc 以 host/g98-sensors.rc 为准（artifacts/ 被 .gitignore 忽略，里面的旧版可能还是
+  # "on boot start"，会让假 HAL 把 system_server 卡在启动阶段）。
+  RC="$HERE/../g98-sensors.rc"
+  [ -f "$RC" ] || RC="$ART/g98-sensors.rc"
   docker cp "$ART/g98-sensors.dex" "$c:/vendor/etc/g98-sensors.dex" >/dev/null 2>&1 || { echo "cp dex failed"; fail=1; continue; }
-  docker cp "$ART/g98-sensors.rc" "$c:/vendor/etc/init/g98-sensors.rc" >/dev/null 2>&1 || { echo "cp rc failed"; fail=1; continue; }
+  docker cp "$RC" "$c:/vendor/etc/init/g98-sensors.rc" >/dev/null 2>&1 || { echo "cp rc failed"; fail=1; continue; }
   docker cp "$HERE/../g98-sensors.sh" "$c:/vendor/bin/g98-sensors.sh" >/dev/null 2>&1 || { echo "cp sh failed"; fail=1; continue; }
   if [ -f "$ART/g98_sensors_trace.bin.gz" ]; then
     docker cp "$ART/g98_sensors_trace.bin.gz" "$c:/vendor/etc/g98_sensors_trace.bin.gz" >/dev/null 2>&1 || echo -n "(trace cp failed) "
