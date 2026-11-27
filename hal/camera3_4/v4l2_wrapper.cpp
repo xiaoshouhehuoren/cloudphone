@@ -827,6 +827,22 @@ int V4L2Wrapper::DequeueRequest(std::shared_ptr<CaptureRequest>* request) {
         src_frame = &yu12_frame;
       }
 
+      // Capture runs at the node's native size; a smaller BLOB request needs
+      // an explicit downscale because EncodeJpegI420 treats the encoded size
+      // as the source stride (native strides + small size would shear it).
+      arc::AllocatedFrameBuffer blob_scaled(
+          static_cast<int>(blob_width * blob_height * 3 / 2));
+      if (src_frame->GetWidth() != blob_width ||
+          src_frame->GetHeight() != blob_height) {
+        blob_scaled.SetWidth(blob_width);
+        blob_scaled.SetHeight(blob_height);
+        if (arc::ImageProcessor::Scale(*src_frame, &blob_scaled)) {
+          HAL_LOGE("Failed to scale frame for BLOB buffer %zu.", i);
+          continue;
+        }
+        src_frame = &blob_scaled;
+      }
+
       const uint8_t* src = src_frame->GetData();
       const int src_width = static_cast<int>(src_frame->GetWidth());
       const int src_height = static_cast<int>(src_frame->GetHeight());
@@ -879,6 +895,20 @@ int V4L2Wrapper::DequeueRequest(std::shared_ptr<CaptureRequest>* request) {
           continue;
         }
         yuv_src = &planar_frame;
+      }
+      // Capture runs at the node's native size; when the client asked for a
+      // smaller size, scale I420 before the NV12 interleave below, otherwise
+      // the plane offsets and strides computed from the stream size are wrong.
+      arc::AllocatedFrameBuffer scaled_frame(
+          static_cast<int>(width * height * 3 / 2));
+      if (yuv_src->GetWidth() != width || yuv_src->GetHeight() != height) {
+        scaled_frame.SetWidth(width);
+        scaled_frame.SetHeight(height);
+        if (arc::ImageProcessor::Scale(*yuv_src, &scaled_frame)) {
+          HAL_LOGE("Failed to scale frame for YUV buffer %zu.", i);
+          continue;
+        }
+        yuv_src = &scaled_frame;
       }
       const uint8_t* src_y = yuv_src->GetData();
       const uint8_t* src_u = src_y + static_cast<size_t>(width) * height;

@@ -183,11 +183,33 @@ int AddFormatComponents(
     }
 
     // Get the available sizes for this format.
-    std::set<std::array<int32_t, 2>> frame_sizes;
-    res = device->GetFormatFrameSizes(v4l2_format, &frame_sizes);
+    std::set<std::array<int32_t, 2>> device_sizes;
+    res = device->GetFormatFrameSizes(v4l2_format, &device_sizes);
     if (res) {
       HAL_LOGE("Failed to get all frame sizes for format %d", v4l2_format);
       return res;
+    }
+
+    // The loopback node is pinned to one native size (keep_format=1), but
+    // legacy Camera API1 clients (WeChat face verification) hard-code small
+    // preview sizes such as 640x480. Advertise smaller same-aspect sizes too:
+    // the HAL keeps capturing at the native size and scales on dequeue (see
+    // V4L2Camera::setupStreams and V4L2Wrapper::DequeueRequest).
+    std::set<std::array<int32_t, 2>> frame_sizes = device_sizes;
+    int32_t native_w = 0;
+    int32_t native_h = 0;
+    for (const auto& s : device_sizes) {
+      if (s[0] * s[1] > native_w * native_h) {
+        native_w = s[0];
+        native_h = s[1];
+      }
+    }
+    for (const auto& small :
+         {std::array<int32_t, 2>{{640, 480}}, std::array<int32_t, 2>{{320, 240}}}) {
+      if (small[0] < native_w && small[1] < native_h &&
+          small[0] * native_h == small[1] * native_w) {
+        frame_sizes.insert(small);
+      }
     }
 
     for (const auto& frame_size : frame_sizes) {
@@ -198,10 +220,16 @@ int AddFormatComponents(
             frame_size[1],
             ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT}});
 
-      // Find the duration range for this format and size.
+      // Find the duration range for this format and size. Injected sizes are
+      // not real device sizes, so reuse the native size's timing (the writer
+      // pins 30 fps and the HAL only scales the picture).
       std::array<int64_t, 2> duration_range;
+      const std::array<int32_t, 2> timing_size =
+          device_sizes.count(frame_size)
+              ? frame_size
+              : std::array<int32_t, 2>{{native_w, native_h}};
       res = device->GetFormatFrameDurationRange(
-          v4l2_format, frame_size, &duration_range);
+          v4l2_format, timing_size, &duration_range);
       if (res) {
         HAL_LOGE(
             "Failed to get frame duration range for format %d, "

@@ -103,7 +103,13 @@ def main():
         print("  minFrameDuration=%dns <= %dns: %s" % (minfd, MAX_PREVIEW_RECORD_DURATION_NS, ok_fps))
         in_cfg = (w, h) in cfgs
         print("  %dx%d present in HAL stream configs: %s" % (w, h, in_cfg))
-        if ok_bounds and ok_fps and in_cfg:
+        # The HAL advertises extra same-aspect small sizes and scales on dequeue,
+        # because legacy API1 clients (WeChat face verification) hard-code 640x480.
+        small_ok = True
+        if w > 640 and h > 480:
+            small_ok = {(640, 480), (320, 240)}.issubset(cfgs)
+        print("  small sizes 640x480/320x240 advertised: %s" % small_ok)
+        if ok_bounds and ok_fps and in_cfg and small_ok:
             print("  [PASS] API1 size list non-empty")
         else:
             print("  [FAIL] API1 size list would be empty"); fails += 1

@@ -19,8 +19,10 @@
 
 #include "v4l2_camera.h"
 
+#include <array>
 #include <cstdlib>
 #include <fcntl.h>
+#include <set>
 
 #include <camera/CameraMetadata.h>
 #include <hardware/camera3.h>
@@ -400,18 +402,21 @@ int V4L2Camera::setupStreams(camera3_stream_configuration_t* stream_config) {
         continue;
       }
       if (stream->width != width || stream->height != height) {
-        HAL_LOGE(
-            "V4L2 only supports 1 stream configuration at a time "
-            "(capture stream is format %d, width %u, height %u, "
-            "stream %u is format %d, width %u, height %u).",
-            format,
-            width,
-            height,
+        // Capture is decoupled from the output sizes now: the device stays at
+        // its native size and DequeueRequest scales/converts each buffer, so
+        // streams no longer have to agree on the geometry. Legacy Camera API1
+        // clients routinely pair e.g. a 640x480 preview with a 320x240
+        // callback stream; rejecting that combination killed their preview.
+        HAL_LOGI(
+            "Stream %u is format %d, %ux%u while capture stream is format %d, "
+            "%ux%u; scaling per output buffer.",
             i,
             stream->format,
             stream->width,
-            stream->height);
-        return -EINVAL;
+            stream->height,
+            format,
+            width,
+            height);
       }
     }
   }
@@ -426,13 +431,37 @@ int V4L2Camera::setupStreams(camera3_stream_configuration_t* stream_config) {
   // The device can only capture one format. YUV420 is the native format of
   // the loopback producers, so try that first and fall back to whatever the
   // capture stream asked for if the device rejects it.
+  // v4l2loopback is pinned with keep_format=1: an S_FMT for another size is
+  // silently ignored, and V4L2Wrapper::SetFormat would then fail the request.
+  // Always capture at the largest (native) size the device offers and scale
+  // each output buffer to the size the client asked for instead. This is what
+  // lets legacy Camera API1 clients open a 640x480 preview on a 1280x960 node.
+  uint32_t capture_width = width;
+  uint32_t capture_height = height;
+  {
+    std::set<std::array<int32_t, 2>> sizes;
+    if (device_->GetFormatFrameSizes(V4L2_PIX_FMT_YUV420, &sizes) == 0) {
+      for (const auto& s : sizes) {
+        if (static_cast<uint32_t>(s[0]) * static_cast<uint32_t>(s[1]) >
+            capture_width * capture_height) {
+          capture_width = static_cast<uint32_t>(s[0]);
+          capture_height = static_cast<uint32_t>(s[1]);
+        }
+      }
+    }
+  }
+  if (capture_width != width || capture_height != height) {
+    HAL_LOGI("Capturing at native %ux%u, scaling output to %ux%u.",
+             capture_width, capture_height, width, height);
+  }
   uint32_t max_buffers = 0;
-  StreamFormat stream_format(HAL_PIXEL_FORMAT_YCbCr_420_888, width, height);
+  StreamFormat stream_format(HAL_PIXEL_FORMAT_YCbCr_420_888, capture_width,
+                             capture_height);
   res = device_->SetFormat(stream_format, &max_buffers);
   if (res) {
     HAL_LOGW("Device rejected YUV420 capture format (%d), trying stream format.",
              res);
-    stream_format = StreamFormat(format, width, height);
+    stream_format = StreamFormat(format, capture_width, capture_height);
     res = device_->SetFormat(stream_format, &max_buffers);
   }
   if (res) {
