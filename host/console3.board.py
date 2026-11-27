@@ -978,7 +978,7 @@ def rtc_stop(name=None):
         return len(victims)
 
 
-def rtc_start(name):
+def rtc_start(name, spawn=True):
     # One board should only run one x264 pipeline at a time.  Opening a second
     # console tab used to leave every selected device encoding forever.  The
     # whole replacement is serialized, otherwise two concurrent starts can
@@ -1028,6 +1028,11 @@ def rtc_start(name):
                 old.stop()
             except Exception:  # noqa: BLE001
                 pass
+        if not spawn:
+            # 懒启动：/api/rtc/start 只做清理和登记，真正的 screenrecord+ffmpeg
+            # 由 /whep 在浏览器真正订阅时拉起（没人看 = 0% 编码 CPU）。
+            return {"ok": True, "name": name, "url": "/whep/" + name,
+                    "pending": True}
         st = RTCSession(name)
         try:
             st.start()
@@ -1038,6 +1043,43 @@ def rtc_start(name):
             RTC_STARTS.setdefault(name, []).append(time.time())
         return {"ok": True, "name": name, "url": "/whep/" + name,
                 "log": st.tail(220), "pid": st.proc.pid}
+
+
+# WHEP 到达时编码器刚起，mediamtx 还没注册 publisher 会回 404。
+# 服务端在这里最多等这么久，把 404 吃掉，浏览器只会觉得首帧慢一点。
+WHEP_READY_TIMEOUT = float(os.environ.get("G98_WHEP_READY_TIMEOUT", "8"))
+
+
+def whep_post(name, sdp):
+    """把 WHEP offer 转发给 mediamtx，返回 (status, body, content_type)。"""
+    req = urllib.request.Request(
+        "http://127.0.0.1:8889/%s/whep" % quote(name),
+        data=sdp, method="POST",
+        headers={"Content-Type": "application/sdp", "Accept": "application/sdp"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status, resp.read(), (resp.headers.get("Content-Type") or "application/sdp")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), (exc.headers.get("Content-Type") or "text/plain; charset=utf-8")
+    except Exception as exc:  # noqa: BLE001
+        return 502, ("MediaMTX WHEP: " + str(exc)).encode("utf-8"), "text/plain; charset=utf-8"
+
+
+def rtc_ensure(name):
+    """WHEP 到达时确保编码器在跑；复用存活会话，否则现拉一条。"""
+    with RTC_LOCK:
+        live = RTC_SESSIONS.get(name)
+    if live is not None and live.alive():
+        return live
+    info = rtc_start(name, spawn=True)
+    if not info.get("ok"):
+        raise RuntimeError(info.get("error") or "rtc start failed")
+    with RTC_LOCK:
+        st = RTC_SESSIONS.get(name)
+    if st is None:
+        raise RuntimeError("rtc session missing after start")
+    _alog("rtc encoder up %s pid=%s for incoming whep" % (name, st.proc.pid))
+    return st
 
 
 LOGIN = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -5419,24 +5461,28 @@ class Handler(BaseHTTPRequestHandler):
         sdp = self.rfile.read(max(0, min(n, 2 * 1024 * 1024)))
         if not sdp:
             return self._json({"error": "empty sdp"}, 400)
-        req = urllib.request.Request(
-            "http://127.0.0.1:8889/%s/whep" % quote(name),
-            data=sdp, method="POST",
-            headers={"Content-Type": "application/sdp", "Accept": "application/sdp"})
+        # 懒启动：编码器在这里才拉起，然后等 mediamtx 看到 publisher 再转发 offer。
+        # 直接转发会 404（WHEP 早于推流），所以对 404/502 做服务端重试，
+        # 浏览器完全无感，只是首帧慢 1-2 秒。
+        try:
+            rtc_ensure(name)
+        except Exception as exc:  # noqa: BLE001
+            _alog("whep %s ensure failed: %s" % (name, str(exc)[:160]))
+            return self._json({"error": str(exc)[:200]}, 503)
+        deadline = time.time() + WHEP_READY_TIMEOUT
         code = 502
         data = b""
         ctype = "text/plain; charset=utf-8"
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                code = resp.status
-                data = resp.read()
-                ctype = resp.headers.get("Content-Type") or "application/sdp"
-        except urllib.error.HTTPError as exc:
-            code = exc.code
-            data = exc.read()
-            ctype = exc.headers.get("Content-Type") or "text/plain; charset=utf-8"
-        except Exception as exc:  # noqa: BLE001
-            data = ("MediaMTX WHEP: " + str(exc)).encode("utf-8")
+        tries = 0
+        while True:
+            tries += 1
+            code, data, ctype = whep_post(name, sdp)
+            if code not in (404, 502, 503):
+                break
+            if time.time() >= deadline:
+                break
+            time.sleep(0.2)
+        _alog("whep %s ready in %d tries (code=%d)" % (name, tries, code))
         if 200 <= code < 300:
             # 真正连上观看端：刷新心跳时间并清掉重连计数，正常刷新页面不会被限流
             with RTC_LOCK:
@@ -5884,10 +5930,15 @@ class Handler(BaseHTTPRequestHandler):
                                "source_frames": snap.get("source_frames")})
         if p == "/api/rtc/start":
             try:
-                info = rtc_start(name)
+                info = rtc_start(name, spawn=False)
             except Exception as exc:  # noqa: BLE001
                 return self._json({"error": str(exc)[:240]}, 500)
-            _alog("rtc start %s pid=%s" % (name, info.get("pid")))
+            if info.get("pending"):
+                _alog("rtc prepare %s (lazy, encoder starts on first WHEP)" % (name,))
+            elif info.get("reused"):
+                _alog("rtc reuse %s pid=%s" % (name, info.get("pid")))
+            else:
+                _alog("rtc spawn %s pid=%s (whep)" % (name, info.get("pid")))
             return self._json(info)
         if p == "/api/rtc/ping":
             with RTC_LOCK:
