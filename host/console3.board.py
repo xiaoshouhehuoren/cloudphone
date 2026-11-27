@@ -770,11 +770,47 @@ def get_stream(name):
 RTC_SESSIONS = {}
 RTC_LOCK = threading.Lock()
 RTC_OP_LOCK = threading.Lock()
+# 无观看端的死循环保护：某些页面/脚本会不停 POST /api/rtc/start（WHEP 一直失败），
+# 每轮都起一条 screenrecord+ffmpeg（约 55% CPU）。60s 内超过 RTC_START_LIMIT 次
+# 就拒绝，等页面自己放弃。
+RTC_STARTS = {}
+RTC_START_LIMIT = int(os.environ.get("G98_RTC_START_LIMIT", "5"))
 
 
 def rtc_active():
     with RTC_LOCK:
         return any(st.alive() for st in RTC_SESSIONS.values())
+
+
+RTC_IDLE_TIMEOUT = float(os.environ.get("G98_RTC_IDLE_TIMEOUT", "45"))
+
+
+def rtc_reap_idle(now=None):
+    """停掉没有观看端心跳的 RTC 会话，返回被停掉的实例名列表。"""
+    now = time.time() if now is None else now
+    victims = []
+    with RTC_LOCK:
+        for name, st in list(RTC_SESSIONS.items()):
+            ref = max(getattr(st, "last_view", 0.0), getattr(st, "started_at", 0.0))
+            if now - ref > RTC_IDLE_TIMEOUT or not st.alive():
+                RTC_SESSIONS.pop(name, None)
+                victims.append((name, st, round(now - ref, 1)))
+    for name, st, age in victims:
+        try:
+            st.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        _alog("rtc reap idle %s after %.1fs without viewer" % (name, age))
+    return [v[0] for v in victims]
+
+
+def rtc_janitor():
+    while True:
+        time.sleep(10)
+        try:
+            rtc_reap_idle()
+        except Exception:  # noqa: BLE001
+            pass
 
 RTC_CAP_W = 480
 RTC_CAP_H = 1066
@@ -830,6 +866,11 @@ class RTCSession(object):
         self.log = "/tmp/rtc-%s.log" % name
         self._pipeline = ""
         self._logf = None
+        # 观看端心跳：页面每 15s 打一次 /api/rtc/ping。没有心跳的会话在
+        # RTC_IDLE_TIMEOUT 秒后由 rtc_janitor 停掉，否则关掉标签页后
+        # screenrecord+ffmpeg 会一直编码（实测残留 20 分钟、55% CPU）。
+        self.started_at = time.time()
+        self.last_view = self.started_at
 
     def _kill_capture(self):
         try:
@@ -938,6 +979,12 @@ def rtc_start(name):
     # whole replacement is serialized, otherwise two concurrent starts can
     # each stop the other's map entry and leave two orphan encoders running.
     with RTC_OP_LOCK:
+        now = time.time()
+        hist = [t for t in RTC_STARTS.get(name, []) if now - t < 60.0]
+        RTC_STARTS[name] = hist
+        if len(hist) >= RTC_START_LIMIT:
+            _alog("rtc throttled %s (%d starts in 60s, no viewer)" % (name, len(hist)))
+            return {"ok": False, "error": "重连过于频繁（没有观看端），已暂停 60s"}
         with RTC_LOCK:
             live = RTC_SESSIONS.get(name)
             stale = live is None or not live.alive()
@@ -983,6 +1030,7 @@ def rtc_start(name):
             raise RuntimeError(str(exc)[:240])
         with RTC_LOCK:
             RTC_SESSIONS[name] = st
+            RTC_STARTS.setdefault(name, []).append(time.time())
         return {"ok": True, "name": name, "url": "/whep/" + name,
                 "log": st.tail(220), "pid": st.proc.pid}
 
@@ -1957,6 +2005,7 @@ function rtcStop(){
   RTCP.active = false;
   if(RTCP.timer){ clearTimeout(RTCP.timer); RTCP.timer = null; }
   if(RTCP.watch){ clearInterval(RTCP.watch); RTCP.watch = null; }
+  if(RTCP.ping){ clearInterval(RTCP.ping); RTCP.ping = null; }
   RTCP.lastT = -1; RTCP.stall = 0;
   if(RTCP.pc){ try{ RTCP.pc.close(); }catch(e){} RTCP.pc = null; }
   var v = el('rtcvideo');
@@ -2035,6 +2084,12 @@ function rtcStart(name){
   post('/api/rtc/start', {name:name}).then(function(j){
     if(gen !== RTCP.gen) return;
     if(!j || j.error) throw new Error((j && j.error) || 'rtc start failed');
+    // 观看端心跳：服务端 45s 收不到就停编码器（关标签页不再泄漏 screenrecord）
+    if(RTCP.ping){ clearInterval(RTCP.ping); }
+    RTCP.ping = setInterval(function(){
+      if(gen !== RTCP.gen){ clearInterval(RTCP.ping); RTCP.ping = null; return; }
+      post('/api/rtc/ping', {name:name}).catch(function(){});
+    }, 15000);
     var pc = new RTCPeerConnection({iceServers:[]});
     RTCP.pc = pc;
     pc.addTransceiver('video', {direction:'recvonly'});
@@ -3518,17 +3573,19 @@ var q=new URLSearchParams(location.search);
 var DEV=q.get('device')||'wx1', K=q.get('k')||'';
 document.getElementById('devname').textContent=DEV;
 var V=document.getElementById('v'), VEIL=document.getElementById('veil'), DOT=document.getElementById('dot'), STAT=document.getElementById('stat');
-var pc=null, gen=0, got=false, retries=0, statsT=null, timer=null;
+var pc=null, gen=0, got=false, retries=0, statsT=null, timer=null, pingT=null;
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.className='show';clearTimeout(t._t);t._t=setTimeout(function(){t.className=''},2400)}
 function post(url,obj){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)}).then(function(r){return r.json().catch(function(){return {}})}).then(function(j){if(j&&j.error)toast(j.error);return j}).catch(function(){toast('网络请求失败');return {ok:false,error:'network'}})}
 function setStat(s){STAT.textContent=s}
 function veil(show,title,text){VEIL.classList.toggle('hide',!show);if(title)document.getElementById('vtitle').textContent=title;if(text)document.getElementById('vtext').textContent=text}
-function stopPC(){gen++;if(timer){clearTimeout(timer);timer=null}if(statsT){clearInterval(statsT);statsT=null}if(pc){try{pc.close()}catch(e){}pc=null}got=false;DOT.className='';}
+function stopPC(){gen++;if(timer){clearTimeout(timer);timer=null}if(statsT){clearInterval(statsT);statsT=null}if(pingT){clearInterval(pingT);pingT=null}if(pc){try{pc.close()}catch(e){}pc=null}got=false;DOT.className='';}
 function connect(){
   if(!window.RTCPeerConnection){veil(true,'浏览器不支持','请使用最新版 Chrome/Safari');return}
   stopPC();var g=++gen;veil(true,'正在连接云手机',DEV+' · WebRTC 低延迟');setStat('连接中');
   fetch('/api/rtc/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:DEV})}).then(function(r){return r.json()}).then(function(j){
     if(g!==gen)return;if(!j||j.error)throw new Error((j&&j.error)||'rtc start failed');
+    if(pingT){clearInterval(pingT)}
+    pingT=setInterval(function(){if(g!==gen){clearInterval(pingT);pingT=null;return}post('/api/rtc/ping',{name:DEV}).catch(function(){})},15000);
     pc=new RTCPeerConnection({iceServers:[]});
     pc.addTransceiver('video',{direction:'recvonly'});
     pc.ontrack=function(ev){if(g!==gen)return;var st=(ev.streams&&ev.streams[0])||new MediaStream([ev.track]);try{V.srcObject=st}catch(e){}try{V.play().catch(function(){})}catch(e){}};
@@ -5360,6 +5417,13 @@ class Handler(BaseHTTPRequestHandler):
             ctype = exc.headers.get("Content-Type") or "text/plain; charset=utf-8"
         except Exception as exc:  # noqa: BLE001
             data = ("MediaMTX WHEP: " + str(exc)).encode("utf-8")
+        if 200 <= code < 300:
+            # 真正连上观看端：刷新心跳时间并清掉重连计数，正常刷新页面不会被限流
+            with RTC_LOCK:
+                st = RTC_SESSIONS.get(name)
+            if st is not None:
+                st.last_view = time.time()
+            RTC_STARTS.pop(name, None)
         try:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -5804,6 +5868,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(exc)[:240]}, 500)
             _alog("rtc start %s pid=%s" % (name, info.get("pid")))
             return self._json(info)
+        if p == "/api/rtc/ping":
+            with RTC_LOCK:
+                st = RTC_SESSIONS.get(name)
+            if st is not None:
+                st.last_view = time.time()
+            return self._json({"ok": True, "alive": st is not None})
         if p == "/api/rtc/stop":
             n = rtc_stop(name)
             _alog("rtc stop %s count=%s" % (name, n))
@@ -5863,6 +5933,7 @@ def cleanup_orphans():
 def main():
     cleanup_orphans()
     threading.Thread(target=refresh_loop, daemon=True).start()
+    threading.Thread(target=rtc_janitor, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     tls_ok = False
     try:
