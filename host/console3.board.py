@@ -1127,6 +1127,7 @@ font-size:13px;outline:none}.trow input:focus{border-color:var(--acc)}
 .livescr img{max-height:calc(100vh - 60px);max-width:100%;object-fit:contain;background:#000;border-radius:6px;
 cursor:crosshair;touch-action:none;user-select:none;-webkit-user-drag:none}
 img.dragging{opacity:.92;filter:brightness(1.05)}
+img.holding{outline:2px solid rgba(94,214,163,.55);outline-offset:-2px}
 .livecam{width:270px;flex:none;border-left:1px solid var(--line);padding:14px;display:flex;flex-direction:column;gap:8px;background:#0c1016}
 .livecam h4{margin:0 0 4px;font-size:13px}
 .livecam select,.livecam input[type=file]{width:100%;background:#0e141c;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px;font-size:12px}
@@ -2172,9 +2173,16 @@ function bindSurface(id){
     e.preventDefault();
     var p = norm(e);
     d = {id:e.pointerId, x:e.clientX, y:e.clientY, t:Date.now(), fx:p.fx, fy:p.fy,
-         moved:false, sent:false, last:0};
+         moved:false, sent:false, last:0, held:false, downOk:null};
     try { img.setPointerCapture(e.pointerId); } catch(err){}
     img.classList.add('dragging');
+    // 长按：按住 380ms 不动就先发 touch-down，抬手再发 touch-up；
+    // 这样长按菜单/拖动排序等手势能拿到真实按住时长（不再被当成一次 tap）。
+    d.holdT = setTimeout(function(){
+      if(!d || d.moved || d.sent) return;
+      d.held = true;                       // 只是 UI 提示 + 抬手时走长按接口
+      img.classList.add('holding');
+    }, 380);
   });
   img.addEventListener('pointermove', function(e){
     if(!d) return;
@@ -2184,7 +2192,7 @@ function bindSurface(id){
     d.last = now;
     var p = norm(e);
     if(Math.abs(p.fx-d.fx) <= 0.004 && Math.abs(p.fy-d.fy) <= 0.004) return;
-    d.moved = true;
+    d.moved = true; d.held = false; clearTimeout(d.holdT); img.classList.remove('holding');
     if(!d.sent){ d.sent = true; tch('d', p); }
     else tch('m', p);
   });
@@ -2192,8 +2200,16 @@ function bindSurface(id){
     if(!d) return;
     e.preventDefault();
     var p = norm(e), st = d, dt = Date.now() - st.t;
-    d = null; img.classList.remove('dragging');
+    d = null; clearTimeout(st.holdT); img.classList.remove('dragging'); img.classList.remove('holding');
     try { img.releasePointerCapture(e.pointerId); } catch(err){}
+    if(st.held && !st.moved){
+      // 长按走 /api/longpress（容器内 input swipe 原地按住），实测能触发
+      // 桌面壁纸菜单、微信长按菜单等；daemon 的孤立 D/U 组合不被系统认作按住。
+      post('/api/longpress',{name:S.sel,fx:st.fx,fy:st.fy,dur:Math.max(450, Math.round(dt))})
+        .then(function(j){ if(!(j && j.ok)) toast('长按失败：'+((j&&j.error)||'未知错误')); });
+      if(img.getAttribute('data-mode') !== 'stream') setTimeout(shot, 300);
+      return;
+    }
     if(st.moved){
       tch('u', p).then(function(j){
         if(j && j.ok === false){              // 守护进程不可用 → 回退 input swipe
@@ -2212,7 +2228,8 @@ function bindSurface(id){
   img.addEventListener('pointerup', end);
   img.addEventListener('pointercancel', function(){
     if(!d) return;
-    var st = d; d = null; img.classList.remove('dragging');
+    var st = d; d = null; clearTimeout(st.holdT);
+    img.classList.remove('dragging'); img.classList.remove('holding');
     if(st.sent) tch('u', {fx:st.fx, fy:st.fy});
   });
   img.addEventListener('contextmenu', function(e){ e.preventDefault(); });
@@ -3535,9 +3552,9 @@ function sendInput(a,fx,fy){var w=IW.ok?IW.ws:inputWS();if(w&&w.readyState===1&&
 function sendKey(code){var w=IW.ok?IW.ws:inputWS();if(w&&w.readyState===1&&IW.ok){try{w.send(JSON.stringify({a:'k',code:code}));return Promise.resolve({ok:true})}catch(e){}}return post('/api/key',{name:DEV,code:code})}
 function norm(e){var r=V.getBoundingClientRect(),vw=V.videoWidth||480,vh=V.videoHeight||1066,s=Math.min(r.width/vw,r.height/vh),w=vw*s,h=vh*s,l=r.left+(r.width-w)/2,t=r.top+(r.height-h)/2;var fx=(e.clientX-l)/w,fy=(e.clientY-t)/h;return {fx:Math.max(0,Math.min(1,fx)),fy:Math.max(0,Math.min(1,fy))}}
 var T=null,longT=null;
-V.addEventListener('pointerdown',function(e){if(T)return;if(e.button!==undefined&&e.button!==0)return;e.preventDefault();var p=norm(e);T={id:e.pointerId,st:p,last:0,moved:false,started:false,t:Date.now()};try{V.setPointerCapture(e.pointerId)}catch(err){}longT=setTimeout(function(){if(T&&!T.moved){T.started=true;sendInput('d',T.st.fx,T.st.fy)}},380)});
+V.addEventListener('pointerdown',function(e){if(T)return;if(e.button!==undefined&&e.button!==0)return;e.preventDefault();var p=norm(e);T={id:e.pointerId,st:p,last:0,moved:false,started:false,t:Date.now()};try{V.setPointerCapture(e.pointerId)}catch(err){}longT=setTimeout(function(){if(T&&!T.moved)T.long=true},380)});
 V.addEventListener('pointermove',function(e){if(!T||e.pointerId!==T.id)return;e.preventDefault();var p=norm(e);if(!T.started){if(Math.abs(p.fx-T.st.fx)<0.007&&Math.abs(p.fy-T.st.fy)<0.007)return;clearTimeout(longT);T.moved=true;T.started=true;sendInput('d',T.st.fx,T.st.fy);}var now=Date.now();if(now-T.last<16)return;T.last=now;sendInput('m',p.fx,p.fy)});
-function end(e){if(!T||e.pointerId!==T.id)return;e.preventDefault();clearTimeout(longT);var st=T;T=null;try{V.releasePointerCapture(e.pointerId)}catch(err){}if(st.started){sendInput('u',norm(e).fx,norm(e).fy)}else{var p=norm(e);sendInput('t',p.fx,p.fy).then(function(j){if(j&&j.ok===false)post('/api/tap',{name:DEV,fx:p.fx,fy:p.fy})})}}
+function end(e){if(!T||e.pointerId!==T.id)return;e.preventDefault();clearTimeout(longT);var st=T;T=null;try{V.releasePointerCapture(e.pointerId)}catch(err){}clearTimeout(longT);if(st.started){var pe=norm(e);sendInput('u',pe.fx,pe.fy)}else if(st.long){post('/api/longpress',{name:DEV,fx:st.st.fx,fy:st.st.fy,dur:Math.max(450,Date.now()-st.t)}).then(function(j){if(!(j&&j.ok))toast((j&&j.error)||'长按失败')})}else{var p=norm(e);sendInput('t',p.fx,p.fy).then(function(j){if(j&&j.ok===false)post('/api/tap',{name:DEV,fx:p.fx,fy:p.fy})})}}
 V.addEventListener('pointerup',end);V.addEventListener('pointercancel',function(e){if(!T||e.pointerId!==T.id)return;clearTimeout(longT);var st=T;T=null;if(st.started)sendInput('u',st.st.fx,st.st.fy)});V.addEventListener('contextmenu',function(e){e.preventDefault()});
 document.querySelectorAll('#dock [data-key]').forEach(function(b){b.addEventListener('click',function(){sendKey(parseInt(b.getAttribute('data-key'),10))})});
 var kbar=document.getElementById('kbar'),kinp=document.getElementById('kinp'),kt=null,kbuf='';
@@ -5654,6 +5671,24 @@ class Handler(BaseHTTPRequestHandler):
             rc, out, err = dexec(name, ["input", "swipe", str(x1), str(y1), str(x2), str(y2), str(dur)], timeout=20)
             _alog("swipe %s %d %d %d %d %d rc=%s %s" % (name, x1, y1, x2, y2, dur, rc, (out + err).strip()[:120]))
             return self._json({"ok": rc == 0, "error": (out + err).strip()[:160] or None})
+        if p == "/api/longpress":
+            # 长按：守护进程可用时前端直接发 D..U；这里是没有守护进程时的兜底，
+            # Android 把"原地 swipe"当作一次长按（不移动、时长即按住时间）。
+            w, h = screen_size(name)
+            try:
+                x = int(round(float(body.get("fx")) * w)); y = int(round(float(body.get("fy")) * h))
+            except Exception:  # noqa: BLE001
+                return self._json({"error": "bad coords"}, 400)
+            try:
+                dur = int(body.get("dur") or 700)
+            except Exception:  # noqa: BLE001
+                dur = 700
+            dur = max(400, min(5000, dur))
+            x = max(0, min(w - 1, x)); y = max(0, min(h - 1, y))
+            rc, out, err = dexec(name, ["input", "swipe", str(x), str(y), str(x), str(y), str(dur)], timeout=25)
+            _alog("longpress %s %d %d dur=%d rc=%s" % (name, x, y, dur, rc))
+            return self._json({"ok": rc == 0, "x": x, "y": y, "dur": dur,
+                               "error": (out + err).strip()[:160] or None})
         if p == "/api/key":
             try:
                 code = int(body.get("code"))
