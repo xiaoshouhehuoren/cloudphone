@@ -19,6 +19,10 @@ Environment=G98_CAMD_H=960
 # surface. On wx1 a 640x480 buffer lands at 1080x1440, i.e. vertical scale is
 # 1.7778x the horizontal scale; pre-compensating keeps circles round on screen.
 Environment=G98_CAMD_YSTRETCH=1.7778
+# Front nodes are NOT pre-flipped: the camera app already mirrors the front preview,
+# which is what a physical phone shows. G98_CAMD_AUTOFRONT_MIRROR=1 would cancel that
+# mirror and show the injected source un-flipped (i.e. reversed vs. a real phone).
+Environment=G98_CAMD_AUTOFRONT_MIRROR=0
 ExecStartPre=/bin/bash /root/g98-camd-prep.sh
 ExecStart=/usr/bin/python3 /root/g98-camd.py
 # Adopting means restarting the provider inside every container, which can take

@@ -51,10 +51,12 @@ STATIC_FPS = int(os.environ.get("G98_CAMD_STATIC_FPS", "12"))
 FIT = os.environ.get("G98_CAMD_FIT", "contain")
 ROTATE = int(os.environ.get("G98_CAMD_ROTATE", "0"))
 MIRROR = os.environ.get("G98_CAMD_MIRROR", "0") == "1"
-# 前置节点默认预翻转：Android 相机 App 的取景器会把自己摄像头画面做左右镜像，
-# 注入的视频/图片如果原样送进去就会"左右反了"。前置节点（20+2(N-1)+1，均为奇数）
-# 默认 hflip 一次抵消 App 的镜像，后置保持不变。
-AUTOFRONT = os.environ.get("G98_CAMD_AUTOFRONT_MIRROR", "1") == "1"
+# 前置节点默认不预翻转（模拟真机）：Android 相机 App / 微信等取景器会把前置画面自己
+# 做一次左右镜像，真机上看到的就是"镜子里的自己"。早先默认 hflip 一次会把 App 的镜像
+# 抵消掉，画面变成"注入源原样"，反而与真机相反（用户反馈"摄像头左右反了"）。
+# 需要"注入什么就显示什么"时设 G98_CAMD_AUTOFRONT_MIRROR=1，
+# 或用 POST /api/cam/start 的 mirror 字段 / 控制台「前置镜像」下拉单独覆盖。
+AUTOFRONT = os.environ.get("G98_CAMD_AUTOFRONT_MIRROR", "0") == "1"
 
 
 def node_is_front(node):

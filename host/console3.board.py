@@ -1599,9 +1599,9 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
           <option value="1">开（默认，切前置也能看到）</option>
           <option value="0">关（只注入所选节点）</option>
         </select>
-        <label class="mini">前置镜像补偿（抵消相机 App 自拍镜像）</label>
+        <label class="mini">前置镜像（真机自拍取景是镜面）</label>
         <select id="cammir">
-          <option value="">自动（前置翻转，后置不翻）</option>
+          <option value="">自动（跟随真机：前置是镜像，后置不翻）</option>
           <option value="0">不翻转</option>
           <option value="1">翻转（左右镜像）</option>
         </select>
