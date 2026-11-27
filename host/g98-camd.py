@@ -16,8 +16,10 @@ import collections
 import errno
 import faulthandler
 import json
+import math
 import os
 import queue
+import random
 import re
 import select
 import signal
@@ -69,6 +71,20 @@ MIRROR = os.environ.get("G98_CAMD_MIRROR", "0") == "1"
 # 需要"注入什么就显示什么"时设 G98_CAMD_AUTOFRONT_MIRROR=1，
 # 或用 POST /api/cam/start 的 mirror 字段 / 控制台「前置镜像」下拉单独覆盖。
 AUTOFRONT = os.environ.get("G98_CAMD_AUTOFRONT_MIRROR", "0") == "1"
+# 注入流"像真机"：真实相机每帧都有传感器噪声、亮度缓慢呼吸、帧间隔抖动，
+# 而解码流/静态图完全没有这些特征（帧间像素完全相同的"贴图流"），人脸活体/
+# 反翻拍检测很容易据此判假。下面几项给注入画面补上这些统计特征：
+#   GRAIN           动态源（video/rtsp/jpeg）每帧随机噪声强度
+#   STATIC_GRAIN    静态源（image/idle）噪声强度，靠预渲染多帧循环实现
+#   STATIC_VARIANTS 静态源预渲染帧数（越大颗粒变化越自然，内存 ×1.8MB/帧）
+#   FRAME_JITTER    写帧周期的随机抖动比例（0.18 = ±18%）
+#   AE_BREATH/AE_PERIOD  整体亮度正弦呼吸幅度与周期（秒）
+GRAIN = int(os.environ.get("G98_CAMD_GRAIN", "6"))
+STATIC_GRAIN = int(os.environ.get("G98_CAMD_STATIC_GRAIN", "5"))
+STATIC_VARIANTS = max(1, int(os.environ.get("G98_CAMD_STATIC_VARIANTS", "6")))
+FRAME_JITTER = float(os.environ.get("G98_CAMD_FRAME_JITTER", "0.18"))
+AE_BREATH = float(os.environ.get("G98_CAMD_AE_BREATH", "0.02"))
+AE_PERIOD = float(os.environ.get("G98_CAMD_AE_PERIOD", "19"))
 
 
 def node_is_front(node):
@@ -95,6 +111,40 @@ def idle_cmd(node):
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
 
 
+_BREATH_TABLE = {}
+
+
+def breath_table(delta):
+    """Y 平面亮度的整数查表：把每像素 +delta 后 clamp 到 0..255。
+
+    bytes.translate 是 C 实现，1.2MB 的 Y 平面一次不到 1ms，比逐像素 Python
+    循环快三个数量级；delta 按 1/255 量化后缓存，表最多 512 份。
+    """
+    step = int(round(delta * 255))
+    tab = _BREATH_TABLE.get(step)
+    if tab is None:
+        tab = bytes(min(255, max(0, v + step)) for v in range(256))
+        if len(_BREATH_TABLE) < 600:
+            _BREATH_TABLE[step] = tab
+    return tab
+
+
+def breath_step(ts):
+    """当前时刻的亮度偏移（单位 1/255 的整数级），用于查表与缓存判定。"""
+    if AE_BREATH <= 0 or AE_PERIOD <= 0:
+        return 0
+    return int(round(AE_BREATH * 255.0 * math.sin(2.0 * math.pi * ts / AE_PERIOD)))
+
+
+def breathe(frame, ts, step=None):
+    """给一帧叠加缓慢的 AE 呼吸（只动 Y 平面，色度不变，肉眼是"曝光在飘"）。"""
+    if step is None:
+        step = breath_step(ts)
+    if step == 0:
+        return frame
+    return frame[:W * H].translate(breath_table(step / 255.0)) + frame[W * H:]
+
+
 def render_static(cmd):
     """Render ONE frame to a raw YU12 buffer for the static (idle/image) kinds.
 
@@ -119,6 +169,42 @@ def render_static(cmd):
               flush=True)
         return None
     return data[:FRAME_SIZE]
+
+
+def render_static_set(cmd, count):
+    """Render `count` consecutive frames with per-frame grain, for cycling.
+
+    静态源只解码一次再重复会得到帧间像素完全相同的"贴图流"。这里一次性渲染
+    若干带独立时域噪声的帧，写线程轮流发，肉眼就是"传感器有颗粒在动"。
+    count=1 时不加噪声，行为与 render_static 一致。
+    """
+    if count <= 1:
+        one = render_static(cmd)
+        return [one] if one is not None else []
+    args = list(cmd)
+    if STATIC_GRAIN > 0:
+        try:
+            i = args.index("-vf")
+        except ValueError:
+            i = -1
+        if i >= 0:
+            args[i + 1] = args[i + 1] + ",noise=alls=%d:allf=t" % STATIC_GRAIN
+    if args and args[-1] == "-":
+        args = args[:-1] + ["-frames:v", str(count), "-"]
+    else:
+        args = args + ["-frames:v", str(count)]
+    try:
+        res = subprocess.run(args, capture_output=True, timeout=40)
+    except Exception as exc:  # noqa: BLE001
+        print("camd: render_static_set failed: %s" % exc, flush=True)
+        return []
+    data = res.stdout
+    frames = [data[o:o + FRAME_SIZE]
+              for o in range(0, len(data) - FRAME_SIZE + 1, FRAME_SIZE)]
+    if not frames:
+        print("camd: render_static_set short %d/%d" % (len(data), FRAME_SIZE),
+              flush=True)
+    return frames
 
 
 def ystretch_filter(ys):
@@ -283,6 +369,11 @@ def build_vf(geo, fps=None):
         chain.append("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black" % (W, H))
     if fps:
         chain.append("fps=%d" % fps)
+    # 真机传感器的时域噪声与曝光呼吸：动态源每帧由 ffmpeg 现算，不增加 Python 开销。
+    if GRAIN > 0:
+        chain.append("noise=alls=%d:allf=t+u" % GRAIN)
+    if AE_BREATH > 0 and AE_PERIOD > 0:
+        chain.append("eq=brightness=%f*sin(2*PI*t/%f)" % (AE_BREATH, AE_PERIOD))
     chain.append("format=yuv420p")
     return ",".join(chain)
 
@@ -567,6 +658,13 @@ class NodeRouter:
         # 原样重发最后一帧（hold），保证节点始终有新帧可 dequeue，HAL 不会超时。
         self.last_frame_ts = 0.0
         self.holding = False
+        # 静态源的预渲染帧序列（每帧带独立噪声），以及循环下标。
+        self.static_set = []
+        self.static_idx = 0
+        # 呼吸合成很贵（1.8MB 拼接 ≈3.7ms/帧），按"亮度档"整组缓存：档位每 ~2s
+        # 才变一次，变时把全部变体重算一遍（6 帧 ≈ 22ms），之后每帧零成本。
+        self.breath_step = None
+        self.breath_frames = []
         self.stop = threading.Event()
         self.writer = threading.Thread(target=self._write_loop, daemon=True)
         self.writer.start()
@@ -607,6 +705,18 @@ class NodeRouter:
                 print("camd: %s source resumed" % self.node, flush=True)
             if frame is None and kind not in (None, "idle"):
                 frame = blank_frame()
+            # 静态源：轮流发预渲染的带噪帧，再叠一层缓慢 AE 呼吸，避免"贴图流".
+            if static is not None and self.static_set:
+                with self.lock:
+                    self.static_idx = (self.static_idx + 1) % len(self.static_set)
+                    frame = self.static_set[self.static_idx]
+                # idle 只是占位彩条，不是"模拟摄像头"，不值得为它付呼吸缓存的内存。
+                step = 0 if kind == "idle" else breath_step(now)
+                if step != self.breath_step:
+                    self.breath_frames = [breathe(f, now, step) for f in self.static_set]
+                    self.breath_step = step
+                if self.breath_frames and len(self.breath_frames) == len(self.static_set):
+                    frame = self.breath_frames[self.static_idx]
             if frame is not None:
                 try:
                     # Blocking write: v4l2loopback only accepts one frame when a
@@ -649,6 +759,9 @@ class NodeRouter:
                 is_static = self.static is not None
             period = 1.0 / (STATIC_FPS if is_static
                             else (FPS if kind != "idle" else IDLE_FPS))
+            # 真机的帧间隔不是恒定值（曝光/传输抖动），固定节拍本身也是"合成流"特征。
+            if FRAME_JITTER > 0:
+                period *= 1.0 + random.uniform(-FRAME_JITTER, FRAME_JITTER)
             dt = period - (time.time() - t0)
             if dt > 0:
                 time.sleep(dt)
@@ -685,11 +798,18 @@ class NodeRouter:
             # 静态源：只解码一帧，写线程原样重复，省掉每节点一个常驻 ffmpeg。
             cmd = idle_cmd(self.node) if kind == "idle" else source_cmd(
                 "image", arg, self.geo)
-            frame = render_static(cmd)
+            # idle 彩条只是占位：2 帧 + 轻噪声即可，没必要占 6×1.8MB 内存。
+            nvar = (max(1, min(2, STATIC_VARIANTS)) if kind == "idle"
+                    else (STATIC_VARIANTS if STATIC_GRAIN > 0 else 1))
+            frames = render_static_set(cmd, nvar)
             with self.lock:
-                self.static = frame if frame is not None else self.static
-                if frame is not None:
-                    self.frame = frame
+                if frames:
+                    self.static_set = frames
+                    self.static = frames[0]
+                    self.static_idx = 0
+                    self.breath_step = None
+                    self.breath_frames = []
+                    self.frame = frames[0]
                     self.seq += 1
             return None
         with self.lock:

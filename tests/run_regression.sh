@@ -35,6 +35,9 @@ python3 verify_sensor_sync.py wx1 || FAIL=1
 say "legacy API1 preview at 640x480 (HAL scales native capture down)"
 python3 verify_api1_preview.py wx1 || FAIL=1
 
+say "camd injection looks like a real sensor (grain + AE breathing)"
+python3 verify_texture.py || FAIL=1
+
 say "camd holds last frame when the rtsp source is silent"
 python3 verify_hold.py || FAIL=1
 

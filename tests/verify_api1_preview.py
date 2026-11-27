@@ -22,6 +22,14 @@ SIZE = (640, 480)
 def sh(cmd, timeout=180):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
 
+def sh_soft(cmd, timeout=60, label=""):
+    """Never let one wedged container command turn the whole test into a traceback."""
+    try:
+        return sh(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print("[WARN] timed out after %ds: %s" % (timeout, label or cmd))
+        return None
+
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "wx1"
     nodes = sh("%s exec %s getprop vendor.camera.redroid.nodes" % (DOCKER, name)).stdout.strip().split(",")
@@ -40,15 +48,19 @@ def main():
         sh("/usr/bin/curl -s -X POST %s/set -H 'Content-Type: application/json' -d '%s'" % (CAMD, body))
     # A foreground camera app holds the devices and makes Camera.open() fail
     # ("Fail to connect to camera service"); the regression e2e step reopens it.
-    sh("%s exec %s am force-stop com.android.camera2" % (DOCKER, name))
+    sh_soft("%s exec %s am force-stop com.android.camera2" % (DOCKER, name), timeout=60, label="force-stop camera2")
     time.sleep(1.5)
     fails = 0
     expected = SIZE[0] * SIZE[1] * 3 // 2
     for cam_id in (1, 0):  # 1 = front (what WeChat face verification opens)
         sh("%s exec %s rm -f /data/local/tmp/cam1small.log" % (DOCKER, name))
-        r = sh("%s exec %s sh /data/local/tmp/run_cam1small.sh %d %d %d"
-               % (DOCKER, name, cam_id, SIZE[0], SIZE[1]), timeout=120)
-        log = sh("%s exec %s cat /data/local/tmp/cam1small.log" % (DOCKER, name)).stdout
+        r = sh_soft("%s exec %s sh /data/local/tmp/run_cam1small.sh %d %d %d"
+                    % (DOCKER, name, cam_id, SIZE[0], SIZE[1]), timeout=180, label="probe camera %d" % cam_id)
+        if r is None:
+            fails += 1
+            continue
+        rc = sh_soft("%s exec %s cat /data/local/tmp/cam1small.log" % (DOCKER, name), timeout=60, label="read probe log")
+        log = rc.stdout if rc is not None else ""
         m = re.search(r"RESULT frames=(\d+) bytes=(\d+)", log)
         sizes = re.search(r"supportedPreview=\[([^\]]*)\]", log)
         print("== %s camera %d ==" % (name, cam_id))
