@@ -15,6 +15,11 @@ COPY artifacts/gralloc.g98.so /vendor/lib64/hw/gralloc.g98.so
 # --- sensors HAL replacement
 COPY artifacts/g98-sensors.dex /vendor/etc/g98-sensors.dex
 COPY artifacts/g98-sensors.rc /vendor/etc/init/g98-sensors.rc
+COPY artifacts/g98-sensors.sh /vendor/bin/g98-sensors.sh
+COPY artifacts/g98_sensors_trace.bin.gz /vendor/etc/g98_sensors_trace.bin.gz
+# --- VINTF: declare the sensors/gnss AIDL HALs, otherwise SensorService
+#     ignores the registered HAL ("No Sensors on the device", devInitCheck -19)
+COPY artifacts/vintf-manifest.xml /vendor/etc/vintf/manifest.xml
 # --- camera provider init overrides (per-instance nodes injected at boot)
 COPY artifacts/android.hardware.camera.provider@2.4-service.rc /vendor/etc/init/android.hardware.camera.provider@2.4-service.rc
 COPY artifacts/android.hardware.camera.provider@2.7-external-service.rc /vendor/etc/init/android.hardware.camera.provider@2.7-external-service.rc

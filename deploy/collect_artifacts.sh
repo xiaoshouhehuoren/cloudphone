@@ -46,4 +46,11 @@ pull /vendor/etc/g98-sensors.dex
 pull /vendor/etc/init/g98-sensors.rc
 pull /vendor/etc/init/android.hardware.camera.provider@2.4-service.rc
 pull /vendor/etc/init/android.hardware.camera.provider@2.7-external-service.rc
+pull /vendor/bin/g98-sensors.sh
+# The VINTF manifest must declare the sensors/gnss AIDL HALs, otherwise
+# SensorService ignores the registered HAL (devInitCheck -19). Keep the
+# artifact name (vintf-manifest.xml) in sync with the Dockerfile COPY.
+pull /vendor/etc/vintf/manifest.xml
+mv -f "$D/manifest.xml" "$D/vintf-manifest.xml"
+pull /vendor/etc/g98_sensors_trace.bin.gz
 echo "done: $(ls -1 "$D" | wc -l) artifacts"
