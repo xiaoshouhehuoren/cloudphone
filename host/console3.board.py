@@ -3523,7 +3523,8 @@ MPAGE = r"""<!doctype html><html lang="zh-CN"><head>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;width:100%;height:100%;height:100dvh;overflow:hidden;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;overscroll-behavior:none}
 :root{--topbar-h:calc(46px + env(safe-area-inset-top));--dock-h:calc(64px + env(safe-area-inset-bottom))}
-#stage{position:fixed;left:0;right:0;top:var(--topbar-h);height:calc(100vh - var(--topbar-h));height:calc(100dvh - var(--topbar-h));background:#000;overflow:hidden}
+/* 顶栏是浮层：舞台从屏幕最顶端开始，避免顶部留一条空白带（顶栏用 safe-area 内边距压住状态栏）。 */
+#stage{position:fixed;left:0;right:0;top:0;height:100vh;height:100dvh;background:#000;overflow:hidden}
 #v{position:absolute;left:0;top:0;width:100%;height:calc(100% - var(--dock-h));object-fit:contain;background:#000;touch-action:none;display:block}
 #veil{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:radial-gradient(circle at 50% 38%,#122131,#03060a 72%);z-index:20;text-align:center;padding:24px;color:#b9c9d9;font-size:13px;line-height:1.7}
 #veil.hide{display:none}
@@ -3720,7 +3721,7 @@ function camHide(){var s=document.getElementById('camsheet');s.classList.remove(
 function camUpload(file,kind){var el=document.getElementById(kind==='image'?'imgstat':'vidstat');return new Promise(function(res,rej){var x=new XMLHttpRequest();x.open('POST','/api/cam/file');x.setRequestHeader('X-Filename',encodeURIComponent(file.name));x.upload.onprogress=function(e){if(e.lengthComputable)camStatus(el,'上传中 '+Math.round(e.loaded/e.total*100)+'%');};x.onload=function(){var j={};try{j=JSON.parse(x.responseText)}catch(e){}if(j&&j.path)res(j);else rej(new Error((j&&j.error)||'上传失败'));};x.onerror=function(){rej(new Error('网络错误'));};x.send(file);});}
 function camInjectFile(file,kind){if(!file)return;if(CAM.busy){toast('上一个注入还在进行中');return;}CAM.busy=true;var el=document.getElementById(kind==='image'?'imgstat':'vidstat');camStatus(el,file.name+' · 准备上传…');camUpload(file,kind).then(function(j){camStatus(el,'已上传，正在切源…');return post('/api/cam/start',{name:DEV,node:camNode(),path:j.path,kind:kind});}).then(function(j){if(j&&(j.ok||j.queued)){camStatus(el,'已注入 '+(kind==='image'?'图片':'视频')+'，云手机相机已切源',true);toast('已切换注入源');}else{camStatus(el,'注入失败：'+((j&&j.error)||'未知错误'),false);}}).catch(function(e){camStatus(el,'失败：'+(e&&e.message?e.message:e),false);}).then(function(){CAM.busy=false;setTimeout(cfgPoll,600);});}
 document.querySelectorAll('.camtab button').forEach(function(b){b.addEventListener('click',function(){camSheetTab(b.getAttribute('data-tab'))});});
-document.querySelectorAll('.seg [data-cnode]').forEach(function(b){b.addEventListener('click',function(){CAM.node=b.getAttribute('data-cnode');document.querySelectorAll('.seg [data-cnode]').forEach(function(x){x.classList.toggle('on',x===b)});if(document.getElementById('camframe').classList.contains('show'))camOpen();toast((CAM.node==='front'?'前置':'后置')+'摄像头 · '+camNode());});});
+document.querySelectorAll('.seg [data-cnode]').forEach(function(b){b.addEventListener('click',function(){CAM.node=b.getAttribute('data-cnode');document.querySelectorAll('.seg [data-cnode]').forEach(function(x){x.classList.toggle('on',x===b)});if(document.getElementById('camframe').classList.contains('show')){camOpen();post('/api/cam/lens',{name:DEV,lens:CAM.node}).then(function(j){if(j&&j.ok)toast('云手机已切到'+(CAM.node==='front'?'前置':'后置')+'摄像头');}).catch(function(){});}toast((CAM.node==='front'?'前置':'后置')+'摄像头 · '+camNode());});});
 document.getElementById('camidle').addEventListener('click',function(){post('/api/cam/stop',{name:DEV}).then(function(){toast('已恢复空闲画面');camStatus(document.getElementById('imgstat'),'已恢复空闲');setTimeout(cfgPoll,600);});});
 document.getElementById('camimg').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'image');});
 document.getElementById('camvideo').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'video');});
@@ -4434,6 +4435,9 @@ def cam_qr_png(text):
 CAM_STATE = {}
 CAM_STATE_LOCK = threading.Lock()
 CAM_TASKS = {}
+# 相机 App 当前镜头（0=后置 1=前置）。Camera2 把上次用的镜头写在 PhotoModule 的
+# SharedPreferences 里，只能外部改写偏好文件来切换，所以这里缓存一份避免重复切。
+CAM_LENS = {}
 
 
 def cam_state(name):
@@ -4526,11 +4530,23 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
             cam_keepf(peer, 1)
         except Exception as exc:  # noqa: BLE001
             _alog("cam start(camd) %s peer %s failed %s" % (name, peer, str(exc)[:120]))
+    # 注入哪一路就把相机 App 切到哪一路：这个镜像的相机 UI 没有切换按钮，
+    # 不切的话点“前置”看到的还是上次那个镜头的画面（后置）。
+    _want = 1 if cam_node_is_front(node) else 0
+    _switched = False
+    if CAM_LENS.get(name) != _want:
+        try:
+            cam_lens_set(name, "front" if _want else "back", launch=False)
+            _switched = True
+        except Exception as exc:  # noqa: BLE001
+            _alog("cam start(camd) %s lens switch failed: %s" % (name, str(exc)[:120]))
     t1 = time.time()
     top = cam_top_activity(name)
     scanning = (top or "").startswith("com.tencent.mm/")
     recovered = False
-    if not cam_client_active(name) and not scanning:
+    # 刚切过镜头时 App 一定被 force-stop 了，但 cam_client_active 可能还没来得及
+    # 反映（am force-stop 是异步的），所以用 _switched 强制走拉起分支。
+    if _switched or (not cam_client_active(name) and not scanning):
         # 节点刚交到 camd 手上时，provider 可能是在旧 producer 名下初始化过的，
         # 这时 devices 会掉到 1 或 App 一开就 busy(-16)。先确保枚举到 2 路再拉 App。
         if cam_devices(name) < 2:
@@ -4836,13 +4852,68 @@ def cam_client_active(name):
     return "package com.android.camera2" in (out or "")
 
 
+CAM_LENS_PREF = ("/data/data/com.android.camera2/shared_prefs/"
+                 "com.android.camera2_preferences_camera_PhotoModule.xml")
+
+
+def cam_node_is_front(node):
+    m = re.search(r"(\d+)$", str(node or ""))
+    return bool(m and int(m.group(1)) % 2 == 1)
+
+
+def cam_lens_set(name, lens, launch=True):
+    """把相机 App 的镜头切到 front/back。
+
+    这个镜像的相机 UI 没有切换按钮，Camera2 又把上次用的镜头记在
+    PhotoModule 的 SharedPreferences（pref_camera_id_key）里，所以只能由
+    外部改写该文件再重启 App：先写到 /srv/redroid/<name>/local/tmp
+    （= 容器 /data/local/tmp），再 docker exec 拷进应用私有目录并改回应用 uid。
+    """
+    idx = 1 if str(lens).lower() in ("front", "1", "前置") else 0
+    xml = ("<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n"
+           "    <string name=\"pref_camera_id_key\">%d</string>\n</map>\n" % idx)
+    host = "/srv/redroid/%s/local/tmp/g98-cam-lens.xml" % name
+    try:
+        os.makedirs(os.path.dirname(host), exist_ok=True)
+        with open(host, "w", encoding="utf-8") as fh:
+            fh.write(xml)
+        os.chmod(host, 0o644)
+    except OSError as exc:
+        _alog("cam lens %s: write %s failed: %s" % (name, host, str(exc)[:120]))
+        return {"ok": False, "error": "write failed"}
+    dexec(name, ["am", "force-stop", "com.android.camera2"], timeout=20)
+    rc, out, _ = dexec(name, ["dumpsys", "package", "com.android.camera2"], timeout=25)
+    m = re.search(r"userId=(\d+)", out or "")
+    uid = m.group(1) if m else "10051"
+    dexec(name, ["cp", "/data/local/tmp/g98-cam-lens.xml", CAM_LENS_PREF], timeout=20)
+    dexec(name, ["chown", "%s:%s" % (uid, uid), CAM_LENS_PREF], timeout=20)
+    dexec(name, ["chmod", "660", CAM_LENS_PREF], timeout=20)
+    if launch:
+        dexec(name, ["am", "start", "-n",
+                     "com.android.camera2/com.android.camera.CameraLauncher"], timeout=25)
+    CAM_LENS[name] = idx
+    _alog("cam lens %s -> %d (uid=%s launch=%s)" % (name, idx, uid, launch))
+    return {"ok": True, "lens": "front" if idx else "back", "id": idx}
+
+
+def cam_current_lens(name):
+    # 读偏好文件比 dumpsys media.camera 快得多（整包 dump 在跑久的实例上会超时）。
+    rc, out, _ = dexec(name, ["cat", CAM_LENS_PREF], timeout=15)
+    m = re.search(r'pref_camera_id_key">(\d)', out or "")
+    return int(m.group(1)) if m else None
+
+
 def cam_device0_open(name):
-    """Camera ID 0 是否已被客户端打开（dumpsys 的 'Device 0 is open/closed'）。"""
+    """相机是否已被客户端打开（dumpsys 的 'Device N is open/closed'）。
+
+    切到前置时打开的是 Device 1，只认 Device 0 会误判成“没打开”并触发一次
+    多余的整栈恢复（实测前置注入会因此多花 5-8 秒）。
+    """
     rc, out, _ = dexec(name, ["dumpsys", "media.camera"], timeout=20)
     out = out or ""
-    if re.search(r"Device 0 is open", out):
+    if re.search(r"Device [01] is open", out):
         return True
-    if re.search(r"Device 0 is closed", out):
+    if re.search(r"Device [01] is closed", out):
         return False
     return None
 
@@ -5994,6 +6065,16 @@ class Handler(BaseHTTPRequestHandler):
                                "src": snap.get("src"),
                                "kind": snap.get("kind"),
                                "source_frames": snap.get("source_frames")})
+        if p == "/api/cam/lens":
+            lens = str(body.get("lens") or "").strip().lower()
+            if lens not in ("front", "back"):
+                return self._json({"error": "lens must be front|back"}, 400)
+            try:
+                res = cam_lens_set(name, lens, launch=True)
+            except Exception as exc:  # noqa: BLE001
+                return self._json({"error": str(exc)[:240]}, 500)
+            res["current"] = cam_current_lens(name)
+            return self._json(res)
         if p == "/api/rtc/start":
             try:
                 info = rtc_start(name, spawn=False)
