@@ -343,10 +343,10 @@ int Camera::processCaptureRequest(camera3_capture_request_t *temp_request)
             return -EINVAL;
         }
     }
-    ALOGE("Camera: pre-copy frame=%u outputs=%u array=%p", temp_request->frame_number,
+    ALOGV("Camera: pre-copy frame=%u outputs=%u array=%p", temp_request->frame_number,
           temp_request->num_output_buffers, temp_request->output_buffers);
     std::shared_ptr<CaptureRequest> request = std::make_shared<CaptureRequest>(temp_request);
-    ALOGE("Camera: post-copy frame=%u outputs=%zu", request->frame_number, request->output_buffers.size());
+    ALOGV("Camera: post-copy frame=%u outputs=%zu", request->frame_number, request->output_buffers.size());
 
     ALOGV("%s:%d: frame: %d", __func__, mId, request->frame_number);
 
@@ -415,7 +415,7 @@ int Camera::processCaptureRequest(camera3_capture_request_t *temp_request)
 
 void Camera::completeRequest(std::shared_ptr<CaptureRequest> request, int err)
 {
-    ALOGI("%s:%d: DBG complete frame %u err %d request %p", __func__, mId, request->frame_number, err, request.get());
+    ALOGV("%s:%d: DBG complete frame %u err %d request %p", __func__, mId, request->frame_number, err, request.get());
     android::Mutex::Autolock tl(mInFlightTrackerLock);
 
     if (!mInFlightTracker->Remove(request)) {
@@ -564,7 +564,12 @@ void Camera::completeRequestWithError(std::shared_ptr<CaptureRequest> request)
     message.message.error.error_code = CAMERA3_MSG_ERROR_REQUEST;
     mCallbackOps->notify(mCallbackOps, &message);
 
-    // TODO(b/31856611): Ensure all the buffers indicate their error status.
+    // Mark every output buffer as errored. Without this the framework sees a
+    // result with timestamp 0 and logs "Stream N: timestamp shouldn't be 0" on
+    // every flush; with the error status the buffers are cancelled cleanly.
+    for (auto& buffer : request->output_buffers) {
+        buffer.status = CAMERA3_BUFFER_STATUS_ERROR;
+    }
 
     // Send the errored out result.
     sendResult(request);

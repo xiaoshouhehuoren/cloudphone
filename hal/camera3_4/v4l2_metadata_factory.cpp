@@ -32,7 +32,8 @@
 namespace v4l2_camera_hal {
 
 // According to spec, each unit of V4L2_CID_AUTO_EXPOSURE_BIAS is 0.001 EV.
-const camera_metadata_rational_t kAeCompensationUnit = {1, 1000};
+// K50-style AE compensation: 1/6 EV per step, +/-4 EV total.
+const camera_metadata_rational_t kAeCompensationUnit = {1, 6};
 // According to spec, each unit of V4L2_CID_EXPOSURE_ABSOLUTE is 100 us.
 const int64_t kV4L2ExposureTimeStepNs = 100000;
 // According to spec, each unit of V4L2_CID_ISO_SENSITIVITY is ISO/1000.
@@ -71,33 +72,40 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   // while OFF implies guarantees about not hindering performance.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<std::array<int32_t, 3>>(ANDROID_CONTROL_MAX_REGIONS,
-                                           {{/*AE*/ 0, /*AWB*/ 0, /*AF*/ 0}})));
-  // TODO(b/30921166): V4L2_CID_AUTO_EXPOSURE_BIAS is an int menu, so
-  // this will be falling back to NoEffect until int menu support is added.
-  components.insert(V4L2ControlOrDefault<int32_t>(
-      ControlType::kSlider,
+                                           {{/*AE*/ 1, /*AWB*/ 1, /*AF*/ 1}})));
+  // The v4l2loopback device exposes no AE bias control, but every real phone
+  // advertises a usable compensation range. Report +/-4 EV (24 steps of 1/6 EV)
+  // so Camera1 clients calling setExposureCompensation() don't fail.
+  components.insert(NoEffectSliderControl<int32_t>(
       ANDROID_CONTROL_AE_EXPOSURE_COMPENSATION,
       ANDROID_CONTROL_AE_COMPENSATION_RANGE,
-      device,
-      V4L2_CID_AUTO_EXPOSURE_BIAS,
-      // No scaling necessary, AE_COMPENSATION_STEP handles this.
-      std::make_shared<ScalingConverter<int32_t, int32_t>>(1, 1),
-      0,
+      -24,
+      24,
       {{OTHER_TEMPLATES, 0}}));
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<camera_metadata_rational_t>(
           ANDROID_CONTROL_AE_COMPENSATION_STEP, kAeCompensationUnit)));
   // TODO(b/31021522): Autofocus subcomponent.
-  components.insert(
-      NoEffectMenuControl<uint8_t>(ANDROID_CONTROL_AF_MODE,
-                                   ANDROID_CONTROL_AF_AVAILABLE_MODES,
-                                   {ANDROID_CONTROL_AF_MODE_OFF}));
+  // K50 back camera has PDAF; the front camera is fixed focus. Advertise the
+  // matching modes so legacy APIs that call setFocusMode() keep working.
+  {
+    std::vector<uint8_t> af_modes = {ANDROID_CONTROL_AF_MODE_OFF};
+    if (id == 0) {
+      af_modes.push_back(ANDROID_CONTROL_AF_MODE_AUTO);
+      af_modes.push_back(ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+      af_modes.push_back(ANDROID_CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+    }
+    components.insert(NoEffectMenuControl<uint8_t>(
+        ANDROID_CONTROL_AF_MODE, ANDROID_CONTROL_AF_AVAILABLE_MODES, af_modes));
+  }
   // TODO(b/31021522): Should read autofocus state from
   // V4L2_CID_AUTO_FOCUS_STATUS bitmask. The framework gets a little more
   // complex than that does; there's a whole state-machine table in
   // the docs (system/media/camera/docs/docs.html).
-  components.insert(FixedState<uint8_t>(ANDROID_CONTROL_AF_STATE,
-                                        ANDROID_CONTROL_AF_STATE_INACTIVE));
+  components.insert(FixedState<uint8_t>(
+      ANDROID_CONTROL_AF_STATE,
+      id == 0 ? ANDROID_CONTROL_AF_STATE_FOCUSED_LOCKED
+              : ANDROID_CONTROL_AF_STATE_INACTIVE));
   // TODO(b/31022735): Correctly implement AE & AF triggers that
   // actually do something. These no effect triggers are even worse than most
   // of the useless controls in this class, since technically they should
@@ -184,104 +192,68 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   // Modes from each API that don't match up:
   // Android: WARM_FLUORESCENT, TWILIGHT.
   // V4L2: FLUORESCENT_H, HORIZON, FLASH.
-  std::unique_ptr<PartialMetadataInterface> awb(V4L2Control<uint8_t>(
-      ControlType::kMenu,
-      ANDROID_CONTROL_AWB_MODE,
-      ANDROID_CONTROL_AWB_AVAILABLE_MODES,
-      device,
-      V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE,
-      std::shared_ptr<ConverterInterface<uint8_t, int32_t>>(new EnumConverter(
-          {{V4L2_WHITE_BALANCE_MANUAL, ANDROID_CONTROL_AWB_MODE_OFF},
-           {V4L2_WHITE_BALANCE_AUTO, ANDROID_CONTROL_AWB_MODE_AUTO},
-           {V4L2_WHITE_BALANCE_INCANDESCENT,
-            ANDROID_CONTROL_AWB_MODE_INCANDESCENT},
-           {V4L2_WHITE_BALANCE_FLUORESCENT,
-            ANDROID_CONTROL_AWB_MODE_FLUORESCENT},
-           {V4L2_WHITE_BALANCE_DAYLIGHT, ANDROID_CONTROL_AWB_MODE_DAYLIGHT},
-           {V4L2_WHITE_BALANCE_CLOUDY,
-            ANDROID_CONTROL_AWB_MODE_CLOUDY_DAYLIGHT},
-           {V4L2_WHITE_BALANCE_SHADE, ANDROID_CONTROL_AWB_MODE_SHADE}})),
-      {{CAMERA3_TEMPLATE_MANUAL, ANDROID_CONTROL_AWB_MODE_OFF},
-       {OTHER_TEMPLATES, ANDROID_CONTROL_AWB_MODE_AUTO}}));
-  if (awb) {
-    components.insert(std::move(awb));
-  } else {
-    // Fall back to simpler AWB or even just an ignored control.
-    components.insert(V4L2ControlOrDefault<uint8_t>(
-        ControlType::kMenu,
-        ANDROID_CONTROL_AWB_MODE,
-        ANDROID_CONTROL_AWB_AVAILABLE_MODES,
-        device,
-        V4L2_CID_AUTO_WHITE_BALANCE,
-        std::shared_ptr<ConverterInterface<uint8_t, int32_t>>(
-            new EnumConverter({{0, ANDROID_CONTROL_AWB_MODE_OFF},
-                               {1, ANDROID_CONTROL_AWB_MODE_AUTO}})),
-        ANDROID_CONTROL_AWB_MODE_AUTO,
-        {{CAMERA3_TEMPLATE_MANUAL, ANDROID_CONTROL_AWB_MODE_OFF},
-         {OTHER_TEMPLATES, ANDROID_CONTROL_AWB_MODE_AUTO}}));
-  }
+  // The v4l2 loopback has no white balance control, but real Camera1 apps
+  // (WeChat/YouTu) expect the usual preset list and call setWhiteBalance() with
+  // them. Advertise the standard presets; they have no effect on the stream.
+  components.insert(NoEffectMenuControl<uint8_t>(
+      ANDROID_CONTROL_AWB_MODE, ANDROID_CONTROL_AWB_AVAILABLE_MODES,
+      {ANDROID_CONTROL_AWB_MODE_AUTO, ANDROID_CONTROL_AWB_MODE_INCANDESCENT,
+       ANDROID_CONTROL_AWB_MODE_FLUORESCENT, ANDROID_CONTROL_AWB_MODE_DAYLIGHT,
+       ANDROID_CONTROL_AWB_MODE_CLOUDY_DAYLIGHT,
+       ANDROID_CONTROL_AWB_MODE_SHADE},
+      {{OTHER_TEMPLATES, ANDROID_CONTROL_AWB_MODE_AUTO}}));
   // TODO(b/31041577): Handle AWB state machine correctly.
   components.insert(FixedState<uint8_t>(ANDROID_CONTROL_AWB_STATE,
                                         ANDROID_CONTROL_AWB_STATE_CONVERGED));
   // TODO(b/31022153): 3A locks.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<uint8_t>(ANDROID_CONTROL_AE_LOCK_AVAILABLE,
-                            ANDROID_CONTROL_AE_LOCK_AVAILABLE_FALSE)));
+                            ANDROID_CONTROL_AE_LOCK_AVAILABLE_TRUE)));
   components.insert(
       NoEffectMenuControl<uint8_t>(ANDROID_CONTROL_AE_LOCK,
                                    DO_NOT_REPORT_OPTIONS,
-                                   {ANDROID_CONTROL_AE_LOCK_OFF}));
+                                   {ANDROID_CONTROL_AE_LOCK_OFF,
+                                    ANDROID_CONTROL_AE_LOCK_ON}));
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<uint8_t>(ANDROID_CONTROL_AWB_LOCK_AVAILABLE,
-                            ANDROID_CONTROL_AWB_LOCK_AVAILABLE_FALSE)));
+                            ANDROID_CONTROL_AWB_LOCK_AVAILABLE_TRUE)));
   components.insert(
       NoEffectMenuControl<uint8_t>(ANDROID_CONTROL_AWB_LOCK,
                                    DO_NOT_REPORT_OPTIONS,
-                                   {ANDROID_CONTROL_AWB_LOCK_OFF}));
+                                   {ANDROID_CONTROL_AWB_LOCK_OFF,
+                                    ANDROID_CONTROL_AWB_LOCK_ON}));
   // TODO(b/30510395): subcomponents of scene modes
   // (may itself be a subcomponent of 3A).
   // Modes from each API that don't match up:
   // Android: FACE_PRIORITY, ACTION, NIGHT_PORTRAIT, THEATRE, STEADYPHOTO,
   // BARCODE, HIGH_SPEED_VIDEO.
   // V4L2: BACKLIGHT, DAWN_DUSK, FALL_COLORS, TEXT.
-  components.insert(V4L2ControlOrDefault<uint8_t>(
-      ControlType::kMenu,
-      ANDROID_CONTROL_SCENE_MODE,
-      ANDROID_CONTROL_AVAILABLE_SCENE_MODES,
-      device,
-      V4L2_CID_SCENE_MODE,
-      std::shared_ptr<ConverterInterface<uint8_t, int32_t>>(new EnumConverter(
-          {{V4L2_SCENE_MODE_NONE, ANDROID_CONTROL_SCENE_MODE_DISABLED},
-           {V4L2_SCENE_MODE_BEACH_SNOW, ANDROID_CONTROL_SCENE_MODE_BEACH},
-           {V4L2_SCENE_MODE_BEACH_SNOW, ANDROID_CONTROL_SCENE_MODE_SNOW},
-           {V4L2_SCENE_MODE_CANDLE_LIGHT,
-            ANDROID_CONTROL_SCENE_MODE_CANDLELIGHT},
-           {V4L2_SCENE_MODE_FIREWORKS, ANDROID_CONTROL_SCENE_MODE_FIREWORKS},
-           {V4L2_SCENE_MODE_LANDSCAPE, ANDROID_CONTROL_SCENE_MODE_LANDSCAPE},
-           {V4L2_SCENE_MODE_NIGHT, ANDROID_CONTROL_SCENE_MODE_NIGHT},
-           {V4L2_SCENE_MODE_PARTY_INDOOR, ANDROID_CONTROL_SCENE_MODE_PARTY},
-           {V4L2_SCENE_MODE_SPORTS, ANDROID_CONTROL_SCENE_MODE_SPORTS},
-           {V4L2_SCENE_MODE_SUNSET, ANDROID_CONTROL_SCENE_MODE_SUNSET}})),
-      ANDROID_CONTROL_SCENE_MODE_DISABLED));
+  components.insert(NoEffectMenuControl<uint8_t>(
+      ANDROID_CONTROL_SCENE_MODE, ANDROID_CONTROL_AVAILABLE_SCENE_MODES,
+      {ANDROID_CONTROL_SCENE_MODE_DISABLED,
+       ANDROID_CONTROL_SCENE_MODE_FACE_PRIORITY,
+       ANDROID_CONTROL_SCENE_MODE_ACTION, ANDROID_CONTROL_SCENE_MODE_PORTRAIT,
+       ANDROID_CONTROL_SCENE_MODE_LANDSCAPE, ANDROID_CONTROL_SCENE_MODE_NIGHT,
+       ANDROID_CONTROL_SCENE_MODE_NIGHT_PORTRAIT,
+       ANDROID_CONTROL_SCENE_MODE_THEATRE, ANDROID_CONTROL_SCENE_MODE_BEACH,
+       ANDROID_CONTROL_SCENE_MODE_SNOW, ANDROID_CONTROL_SCENE_MODE_SUNSET,
+       ANDROID_CONTROL_SCENE_MODE_STEADYPHOTO,
+       ANDROID_CONTROL_SCENE_MODE_FIREWORKS, ANDROID_CONTROL_SCENE_MODE_SPORTS,
+       ANDROID_CONTROL_SCENE_MODE_PARTY,
+       ANDROID_CONTROL_SCENE_MODE_CANDLELIGHT},
+      {{OTHER_TEMPLATES, ANDROID_CONTROL_SCENE_MODE_DISABLED}}));
   // TODO(b/31022612): Scene mode overrides.
   // Modes from each API that don't match up:
   // Android: POSTERIZE, WHITEBOARD, BLACKBOARD.
   // V4L2: ANTIQUE, ART_FREEZE, EMBOSS, GRASS_GREEN, SKETCH, SKIN_WHITEN,
   // SKY_BLUE, SILHOUETTE, VIVID, SET_CBCR.
-  components.insert(V4L2ControlOrDefault<uint8_t>(
-      ControlType::kMenu,
-      ANDROID_CONTROL_EFFECT_MODE,
-      ANDROID_CONTROL_AVAILABLE_EFFECTS,
-      device,
-      V4L2_CID_COLORFX,
-      std::shared_ptr<ConverterInterface<uint8_t, int32_t>>(new EnumConverter(
-          {{V4L2_COLORFX_NONE, ANDROID_CONTROL_EFFECT_MODE_OFF},
-           {V4L2_COLORFX_BW, ANDROID_CONTROL_EFFECT_MODE_MONO},
-           {V4L2_COLORFX_NEGATIVE, ANDROID_CONTROL_EFFECT_MODE_NEGATIVE},
-           {V4L2_COLORFX_SOLARIZATION, ANDROID_CONTROL_EFFECT_MODE_SOLARIZE},
-           {V4L2_COLORFX_SEPIA, ANDROID_CONTROL_EFFECT_MODE_SEPIA},
-           {V4L2_COLORFX_AQUA, ANDROID_CONTROL_EFFECT_MODE_AQUA}})),
-      ANDROID_CONTROL_EFFECT_MODE_OFF));
+  components.insert(NoEffectMenuControl<uint8_t>(
+      ANDROID_CONTROL_EFFECT_MODE, ANDROID_CONTROL_AVAILABLE_EFFECTS,
+      {ANDROID_CONTROL_EFFECT_MODE_OFF, ANDROID_CONTROL_EFFECT_MODE_MONO,
+       ANDROID_CONTROL_EFFECT_MODE_NEGATIVE,
+       ANDROID_CONTROL_EFFECT_MODE_SOLARIZE, ANDROID_CONTROL_EFFECT_MODE_SEPIA,
+       ANDROID_CONTROL_EFFECT_MODE_AQUA},
+      {{OTHER_TEMPLATES, ANDROID_CONTROL_EFFECT_MODE_OFF}}));
   // TODO(b/31021654): This should behave as a top level switch, not no effect.
   // Should enforce being set to USE_SCENE_MODE when a scene mode is requested.
   components.insert(NoEffectMenuControl<uint8_t>(
@@ -350,19 +322,28 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
                                  ANDROID_LENS_INFO_AVAILABLE_FILTER_DENSITIES,
                                  {0.0}));
   // V4L2 focal units do not correspond to a particular physical unit.
+  // Back camera is the only one with a real focusing lens, so it reports
+  // APPROXIMATE calibration (needed for Camera1 to advertise "infinity");
+  // the front camera stays uncalibrated/fixed-focus like a real selfie cam.
   components.insert(
       std::unique_ptr<PartialMetadataInterface>(new Property<uint8_t>(
           ANDROID_LENS_INFO_FOCUS_DISTANCE_CALIBRATION,
-          ANDROID_LENS_INFO_FOCUS_DISTANCE_CALIBRATION_UNCALIBRATED)));
+          k50_back ? ANDROID_LENS_INFO_FOCUS_DISTANCE_CALIBRATION_APPROXIMATE
+                   : ANDROID_LENS_INFO_FOCUS_DISTANCE_CALIBRATION_UNCALIBRATED)));
   // TODO(b/31022711): Focus distance component.
   // Using a NoEffectMenuControl for now because for
   // fixed-focus it meets expectations. Framework may allow
   // setting any value and expect it to be clamped to 0, in which
   // case this will have unexpected behavior (failing on non-0 settings).
-  components.insert(
-      NoEffectMenuControl<float>(ANDROID_LENS_FOCUS_DISTANCE,
-                                 ANDROID_LENS_INFO_MINIMUM_FOCUS_DISTANCE,
-                                 {0}));
+  // 10 diopters = 10cm: a self-consistent focusing lens for the back camera.
+  // Camera1 keys off MINIMUM_FOCUS_DISTANCE[0] != 0 to enable AF modes at all,
+  // so the front camera must stay 0 (fixed focus). The tag itself allows only a
+  // single value, so it is a plain Property and the control accepts any focus
+  // distance (0 = infinity ... 10 = closest).
+  components.insert(NoEffectOptionlessControl<float>(
+      ANDROID_LENS_FOCUS_DISTANCE, 0.0f));
+  components.insert(std::make_unique<Property<float>>(
+      ANDROID_LENS_INFO_MINIMUM_FOCUS_DISTANCE, k50_back ? 10.0f : 0.0f));
   // Hypefocal distance doesn't mean much for a fixed-focus uncalibrated device.
   components.insert(std::make_unique<Property<float>>(
       ANDROID_LENS_INFO_HYPERFOCAL_DISTANCE, 0));
@@ -440,7 +421,8 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   components.insert(NoEffectMenuControl<std::array<int32_t, 2>>(
       ANDROID_JPEG_THUMBNAIL_SIZE,
       ANDROID_JPEG_AVAILABLE_THUMBNAIL_SIZES,
-      {{{0, 0}}}));
+      {{{0, 0}}, {{160, 120}}, {{320, 240}}},
+      {{OTHER_TEMPLATES, {{0, 0}}}}));
   // TODO(b/31022752): Get this from the device, not constant.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<int32_t>(ANDROID_JPEG_MAX_SIZE, kV4L2MaxJpegSize)));
@@ -477,8 +459,10 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   // it's driver dependent. For now, assume freeform, and
   // some cameras may just behave badly.
   // TODO(b/29579652): Figure out a way to determine this.
+  // Real phones advertise digital zoom; the crop region is a no-op here, but
+  // reporting 1.0 makes legacy clients disable zoom entirely.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
-      new Property<float>(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM, 1)));
+      new Property<float>(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM, 8.0f)));
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<uint8_t>(ANDROID_SCALER_CROPPING_TYPE,
                             ANDROID_SCALER_CROPPING_TYPE_FREEFORM)));
@@ -511,9 +495,11 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
                                            k50_back ? 4.80f : 3.45f}})));
   // HAL uses BOOTTIME timestamps.
   // TODO(b/29457051): make sure timestamps are consistent throughout the HAL.
+  // Real devices report REALTIME; timestamps come from CLOCK_BOOTTIME, which
+  // matches the REALTIME source on devices that never suspend.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<uint8_t>(ANDROID_SENSOR_INFO_TIMESTAMP_SOURCE,
-                            ANDROID_SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN)));
+                            ANDROID_SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)));
   components.insert(std::make_unique<State<int64_t>>(
       ANDROID_SENSOR_TIMESTAMP, std::make_unique<BoottimeStateDelegate>()));
   // No way to actually get shutter skew from V4L2.
