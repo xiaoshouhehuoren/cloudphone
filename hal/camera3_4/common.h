@@ -48,8 +48,13 @@
     ALOGD("%s:%d: " fmt, __func__, __LINE__, ##args);   \
   } while(0)
 
+// Verbose tracing is opt-in.  ALOGV itself is not runtime-filtered, so the
+// old macro wrote several lines per frame into Android logd even at the default
+// log level.  Enable it for debugging with: setprop log.tag.G98CamHAL VERBOSE
 #define HAL_LOGV(fmt, args...) do { \
-    ALOGV("%s:%d: " fmt, __func__, __LINE__, ##args);   \
+    if (__android_log_is_loggable(ANDROID_LOG_VERBOSE, "G98CamHAL", ANDROID_LOG_INFO)) { \
+      ALOGV("%s:%d: " fmt, __func__, __LINE__, ##args); \
+    } \
   } while(0)
 
 // Log enter/exit of methods.

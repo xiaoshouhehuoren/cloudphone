@@ -16,6 +16,8 @@
 
 #include "capture_request.h"
 
+#include "common.h"
+
 #include <cutils/native_handle.h>
 #include <log/log.h>
 #include <mutex>
@@ -49,17 +51,17 @@ CaptureRequest::~CaptureRequest() {
 }
 
 CaptureRequest::CaptureRequest(const camera3_capture_request_t* request) {
-  ALOGE("CaptureRequest: CTOR request=%p", request);
+  HAL_LOGV("CaptureRequest: CTOR request=%p", request);
   if (!request) {
     return;
   }
-  ALOGE("CaptureRequest: CTOR fields req=%p frame=%u nout=%u outs=%p input=%p",
+  HAL_LOGV("CaptureRequest: CTOR fields req=%p frame=%u nout=%u outs=%p input=%p",
         request, request->frame_number, request->num_output_buffers,
         request->output_buffers, request->input_buffer);
   for (uint32_t i = 0; i < request->num_output_buffers && i < 8; ++i) {
     const camera3_stream_buffer_t& b = request->output_buffers[i];
     const native_handle_t* h = b.buffer ? *b.buffer : nullptr;
-    ALOGE("CaptureRequest: CTOR buf[%u] stream=%p bufptr=%p h=%p v=%d fds=%d ints=%d",
+    HAL_LOGV("CaptureRequest: CTOR buf[%u] stream=%p bufptr=%p h=%p v=%d fds=%d ints=%d",
           i, b.stream, b.buffer, h, h ? h->version : -1,
           h ? h->numFds : -1, h ? h->numInts : -1);
   }
@@ -104,7 +106,7 @@ CaptureRequest::CaptureRequest(const camera3_capture_request_t* request) {
     const native_handle_t* incoming =
         output_buffer.buffer ? *output_buffer.buffer : nullptr;
     native_handle_t* clone = incoming ? native_handle_clone(incoming) : nullptr;
-    ALOGE("CaptureRequest: clone src=%p v=%d fds=%d ints=%d dst=%p v=%d fds=%d ints=%d",
+    HAL_LOGV("CaptureRequest: clone src=%p v=%d fds=%d ints=%d dst=%p v=%d fds=%d ints=%d",
           incoming, incoming ? incoming->version : -1, incoming ? incoming->numFds : -1,
           incoming ? incoming->numInts : -1, clone, clone ? clone->version : -1,
           clone ? clone->numFds : -1, clone ? clone->numInts : -1);

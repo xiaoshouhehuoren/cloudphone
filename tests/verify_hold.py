@@ -9,7 +9,8 @@ legacy Camera API1 clients (WeChat face verification) killed the session with
 
 Cases checked on /dev/video22 (wx2):
   A. no publisher at all    -> a black fill frame keeps written growing at FPS,
-                               source_frames stays 0, no write errors.
+                               source_frames stays 0, no write errors, and empty
+                               connection attempts back off instead of spinning.
   B. publisher then silence  -> last real frame is repeated (holding=true), the
                                node keeps receiving frames, and the reader does
                                NOT reconnect before MAX_SILENCE (30s).
@@ -55,16 +56,43 @@ def main():
 
     # ---- case A: no publisher at all -------------------------------------
     post("/set", {"node": NODE, "kind": "rtsp", "url": URL, "fit": "contain"})
-    time.sleep(3)
-    a, b, fps = sample(5)
+    started = time.time()
+    a = state()
+    restart_times = []
+    last_restarts = a["source_restarts"]
+    b = a
+    # mediamtx rejects a path with no publisher immediately, so attempts can
+    # end before START_TIMEOUT.  Backoff still spaces them about 2s, 4s, 8s,
+    # 15s apart; the old fixed 1s retry produced roughly one attempt/second.
+    while time.time() - started < 34:
+        time.sleep(1)
+        b = state()
+        if b["source_restarts"] != last_restarts:
+            restart_times.append(round(time.time() - started, 1))
+            last_restarts = b["source_restarts"]
+    elapsed = time.time() - started
+    fps = (b["written"] - a["written"]) / elapsed
     print("A no-publisher: written %d -> %d (%.1f fps) source_frames %d -> %d errors %d"
           % (a["written"], b["written"], fps, a["source_frames"], b["source_frames"], b["errors"]))
+    print("A backoff: restarts at %s, next delay=%ss" % (restart_times, b.get("retry_delay")))
     if fps < 10:
         failures.append("blank fill frame not written (%.1f fps < 10)" % fps)
     if b["errors"]:
         failures.append("write errors=%d" % b["errors"])
     if "holding" not in b or "last_frame_age" not in b:
         failures.append("/state lacks holding/last_frame_age fields")
+    if b.get("retry_delay", 0) < 4:
+        failures.append("zero-frame retry backoff did not increase (delay=%s)" % b.get("retry_delay"))
+    if len(restart_times) < 4:
+        failures.append("expected at least four empty-source retries, got %s" % restart_times)
+    else:
+        gaps = [round(restart_times[i + 1] - restart_times[i], 1)
+                for i in range(len(restart_times) - 1)]
+        print("A backoff gaps: %s" % gaps)
+        if gaps[-1] < 12:
+            failures.append("last retry gap did not reach ~15s: %s" % gaps)
+    if b["source_restarts"] > 6:
+        failures.append("too many empty-source retries in 34s: %d" % b["source_restarts"])
 
     # ---- case B: real publisher, then silence ----------------------------
     pub = subprocess.Popen(
@@ -84,7 +112,10 @@ def main():
         pub.kill()
         post("/set", {"node": NODE, "kind": "idle"})
         fail("publisher never delivered frames to %s" % NODE)
-    print("B live: source_frames=%d holding=%s" % (live["source_frames"], live["holding"]))
+    print("B live: source_frames=%d holding=%s retry_delay=%s"
+          % (live["source_frames"], live["holding"], live.get("retry_delay")))
+    if live.get("retry_delay") != 0:
+        failures.append("receiving frames did not reset retry backoff")
     pub.kill()
     pub.wait()
 

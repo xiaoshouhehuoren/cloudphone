@@ -46,6 +46,11 @@ MAX_SILENCE = float(os.environ.get("G98_CAMD_MAX_SILENCE", "30"))
 # 源多久没有新帧就进入 hold（重复最后一帧）。比 MAX_SILENCE 小得多：1s 没新帧就
 # 说明推流断了/卡了，画面立即冻结在最后一帧，而不是等 30s 后重连。
 HOLD_AFTER = float(os.environ.get("G98_CAMD_HOLD_AFTER", "1.0"))
+# A source that has never produced a frame (usually an RTSP path with no
+# publisher) gets exponential retry backoff.  The first connection is still
+# immediate; only empty attempts are delayed.  Any decoded frame resets this.
+RETRY_MIN = float(os.environ.get("G98_CAMD_RETRY_MIN", "2"))
+RETRY_MAX = float(os.environ.get("G98_CAMD_RETRY_MAX", "15"))
 IDLE_FPS = int(os.environ.get("G98_CAMD_IDLE_FPS", "5"))
 # 静态帧（idle/image）重复写的节拍。30fps 时 10 个 1280x960 节点要写约 550MB/s，
 # camd 自身 ~30% CPU、每台 provider ~17%；静态画面降频不影响观感，
@@ -314,6 +319,7 @@ class Reader(threading.Thread):
         self.stop = threading.Event()
         self.frames = 0
         self.restarts = 0
+        self.retry_delay = 0.0
         self.stdin_lock = threading.RLock()
         self.dropped = 0
         self.fed_frames = 0
@@ -353,13 +359,26 @@ class Reader(threading.Thread):
         # A source can die or not exist yet (e.g. an RTSP publisher that comes up
         # after us). Keep retrying instead of leaving the node on its last frame.
         while not self.stop.is_set():
+            frames_before = self.frames
             self._run_once()
             if self.stop.is_set():
                 break
             self.restarts += 1
-            print("camd: source %s %s ended, restart #%d" %
-                  (self.kind, self.arg, self.restarts), flush=True)
-            time.sleep(1.0)
+            if self.frames > frames_before:
+                # A source that worked gets a prompt reconnect after it ends.
+                self.retry_delay = 0.0
+                delay = 1.0
+            else:
+                # Do not relaunch ffmpeg in a tight loop while nobody publishes.
+                # 2, 4, 8, 15, 15... seconds; reset above/on the first real frame.
+                self.retry_delay = (RETRY_MIN if self.retry_delay <= 0
+                                    else min(self.retry_delay * 2, RETRY_MAX))
+                delay = self.retry_delay
+            print("camd: source %s %s ended, restart #%d in %.0fs (%d new frames)" %
+                  (self.kind, self.arg, self.restarts, delay,
+                   self.frames - frames_before), flush=True)
+            # Event.wait, unlike sleep, lets set_source() cancel the backoff.
+            self.stop.wait(delay)
 
     def _run_once(self):
         if self.kind == "jpeg":
@@ -431,6 +450,7 @@ class Reader(threading.Thread):
                 frame = bytes(buf[:FRAME_SIZE])
                 del buf[:FRAME_SIZE]
                 self.frames += 1
+                self.retry_delay = 0.0
                 self.on_frame(frame)
         if self.kind == "jpeg":
             print("camd: jpeg decoder exit frames=%d poll=%s" % (self.frames, self.proc.poll()), flush=True)
@@ -645,7 +665,8 @@ class NodeRouter:
         fit = (fit or self.fit or FIT)
         rotate = self.rotate if rotate is None else int(rotate)
         if mirror is None:
-            # 前置节点默认预翻转，抵消相机 App 取景器的自拍镜像；后置保持原样。
+            # 默认不预翻转：相机 App 自己镜像前置取景，和真机自拍一致。
+            # AUTOFRONT=1 才会抵消 App 镜像，让前置也按注入源原方向显示。
             mirror = bool(AUTOFRONT and node_is_front(self.node))
         else:
             mirror = bool(mirror)
@@ -707,6 +728,7 @@ class NodeRouter:
                                  if (self.decoder or self.reader) else 0,
                 "source_restarts": (self.decoder or self.reader).restarts
                                    if (self.decoder or self.reader) else 0,
+                "retry_delay": getattr(self.decoder or self.reader, "retry_delay", 0.0),
                 "source_dropped": (self.decoder or self.reader).dropped
                                   if (self.decoder or self.reader) else 0,
                 # 源静默时写线程重复最后一帧，written 继续增长而 source_frames 不动。
