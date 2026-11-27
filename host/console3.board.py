@@ -51,14 +51,16 @@ def _alog(msg):
 # ---------------- 实时画面（MJPEG 推流） ----------------
 # 设备端没有可用编码器（screenrecord -h264 报 Encoder failed -38），但
 # screenrecord --output-format=raw-frames 可用（原生分辨率 RGBA，不编码）。
-# 链路：容器 raw-frames（docker exec 直取，359MB/s）→ 板子 ffmpeg（缩放到 480x854 + JPEG）
+# 链路：容器 raw-frames（docker exec 直取，359MB/s）→ 板子 ffmpeg（缩放到 720x1280 + JPEG）
 #       → multipart/x-mixed-replace。走 adb 时被 33MB/s 卡死在 9fps，故不用 adb。
 STREAMS = {}
 STREAMS_LOCK = threading.Lock()
 ADB_SERIALS = {}
 STREAM_FPS = 15
-STREAM_OUT_W, STREAM_OUT_H = 480, 854
-STREAM_JPEG_Q = 6
+# 480x854 在 1080x2400 的屏幕上等于把画面砍掉一半像素，字都在糊；720x1280 是
+# 同样的宽高比、2.25 倍像素，JPEG q=4 后每帧约 100-150KB，局域网完全吃得下。
+STREAM_OUT_W, STREAM_OUT_H = 720, 1280
+STREAM_JPEG_Q = 4
 FFMPEG_STREAM = "/root/ffmpeg" if os.path.exists("/root/ffmpeg") else "ffmpeg"
 
 
@@ -96,8 +98,8 @@ class Stream(object):
         self.w, self.h = w, h
         # 实测：screenrecord 以原生 1080x2400 抓帧只有 16-20fps（读回带宽限制），
         # 加 --size 让设备侧先缩放反而能跑到 60fps+，且管道数据量降 2.2 倍。
-        # 目标：抓帧像素 ≈ 72*160 万（1080x2400 → 720x1600）。
-        k = min(1.0, (540.0 * 1200.0 / float(w * h)) ** 0.5)
+        # 目标：抓帧像素 ≈ 115 万（1080x2400 → 720x1600），再缩到 720x1280。
+        k = min(1.0, (720.0 * 1600.0 / float(w * h)) ** 0.5)
         self.cw = max(2, int(round(w * k / 2.0)) * 2)
         self.ch = max(2, int(round(h * k / 2.0)) * 2)
         self.frame_bytes = self.cw * self.ch * 3
@@ -1496,6 +1498,11 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
           <option value="cover">铺满裁切（不变形）</option>
           <option value="stretch">拉伸铺满（会变形）</option>
         </select>
+        <label class="mini">同时注入前后摄</label>
+        <select id="camboth">
+          <option value="1">开（默认，切前置也能看到）</option>
+          <option value="0">关（只注入所选节点）</option>
+        </select>
         <label class="mini">旋转</label>
         <select id="camrot">
           <option value="0">不旋转</option>
@@ -2525,9 +2532,10 @@ function camStartWS(){
   camWS.onclose = function(){ camLog('相机连接已关闭'); };
 }
 function camFitOpts(){
-  var fitEl=el('camfit'), rotEl=el('camrot');
+  var fitEl=el('camfit'), rotEl=el('camrot'), bothEl=el('camboth');
   var o={fit: fitEl?fitEl.value:'contain'};
   if(rotEl) o.rotate=parseInt(rotEl.value,10)||0;
+  o.both = bothEl ? bothEl.value !== '0' : true;
   return o;
 }
 function camStartPost(body){
@@ -2958,14 +2966,14 @@ function pump(){
 var jpegTimer=null, jpegCanvas=null, jpegCtx=null, jpegBusy=false, jpegFrames=0;
 function stopJpeg(){ if(jpegTimer){ clearInterval(jpegTimer); jpegTimer=null; } jpegBusy=false; }
 function jpegPaint(){
-  if(!jpegCanvas){ jpegCanvas=document.createElement("canvas"); jpegCanvas.width=640; jpegCanvas.height=480; jpegCtx=jpegCanvas.getContext("2d"); }
-  var c=jpegCtx; c.fillStyle="#000"; c.fillRect(0,0,640,480);
+  if(!jpegCanvas){ jpegCanvas=document.createElement("canvas"); jpegCanvas.width=1280; jpegCanvas.height=960; jpegCtx=jpegCanvas.getContext("2d"); }
+  var c=jpegCtx; c.fillStyle="#000"; c.fillRect(0,0,1280,960);
   try{
     var sw=pv.videoWidth, sh=pv.videoHeight;
     if(sw&&sh){
-      var sc=Math.min(640/sw,480/sh), dw=sw*sc, dh=sh*sc;
-      c.drawImage(pv,(640-dw)/2,(480-dh)/2,dw,dh);
-    }else{ c.fillStyle="#333"; c.fillRect(0,0,640,480); c.fillStyle="#fff"; c.font="bold 30px sans-serif"; c.fillText("等待画面…",232,250); }
+      var sc=Math.min(1280/sw,960/sh), dw=sw*sc, dh=sh*sc;
+      c.drawImage(pv,(1280-dw)/2,(960-dh)/2,dw,dh);
+    }else{ c.fillStyle="#333"; c.fillRect(0,0,1280,960); c.fillStyle="#fff"; c.font="bold 60px sans-serif"; c.fillText("等待画面…",500,500); }
   }catch(e){}
 }
 function startJpegFallback(){
@@ -2990,7 +2998,7 @@ function startJpegFallback(){
             if(jpegFrames%10===0){ document.getElementById("frames").textContent=jpegFrames+" 帧"; document.getElementById("bytes").textContent=(jpegFrames*0.02).toFixed(1)+" MB"; }
           }
        }).catch(function(){}).then(function(){ jpegBusy=false; });
-    },"image/jpeg",0.72);
+    },"image/jpeg",0.85);
   },120);
   setTimeout(function(){
     camStatus(function(j){
@@ -3130,7 +3138,7 @@ function camWait(n){
 }
 function camStart(){
   if(camStarted) return; camStarted=true;
-  var body={name:dev,node:node,path:'rtsp://127.0.0.1:8554/cam-'+dev,kind:'stream'};
+  var body={name:dev,node:node,path:'rtsp://127.0.0.1:8554/cam-'+dev,kind:'stream',both:true};
   fetch('/api/cam/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
    .then(function(r){ return r.json(); })
    .then(function(j){
@@ -3985,6 +3993,17 @@ def cam_norm_node(name, node):
     if re.match(r"^/dev/video(2\d|3[01])$", node or ""):
         return node
     return back
+
+
+def cam_pair_node(name, node):
+    """同一实例的另一路节点（后置 <-> 前置）；不是本实例的节点时返回 None。
+    相机 App 会记住上次用的摄像头，前后摄不同步时切过去就看不到注入内容。"""
+    back, front = cam_nodes_for(name)
+    if node == back:
+        return front
+    if node == front:
+        return back
+    return None
 CAM_PROVIDER = "vendor.camera-provider-2-4-legacy"
 
 
@@ -4310,6 +4329,16 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
     cam_idle("stop")
     cam_camd_set(node, cam_camd_kind(kind), path, geom=geom)
     cam_keepf(node, 1)
+    # 默认把同一个源也下发给另一路（后置 <-> 前置）。相机 App 记住上次摄像头时，
+    # 只注入一路会出现“切过去全黑/看到旧画面”，像是前置拿到了后置的数据。
+    both = True if not geom or geom.get("both") is None else bool(geom.get("both"))
+    peer = cam_pair_node(name, node)
+    if both and peer and kind in ("image", "video", "stream"):
+        try:
+            cam_camd_set(peer, cam_camd_kind(kind), path, geom=geom)
+            cam_keepf(peer, 1)
+        except Exception as exc:  # noqa: BLE001
+            _alog("cam start(camd) %s peer %s failed %s" % (name, peer, str(exc)[:120]))
     t1 = time.time()
     top = cam_top_activity(name)
     scanning = (top or "").startswith("com.tencent.mm/")
@@ -4341,7 +4370,7 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
     if not scanning and open0 is False:
         err = "相机未就绪（Device 0 仍为 closed）"
     st = cam_state_set(name, state="streaming", node=node, kind=kind, pid=None,
-                       size="640x480", provider="camd",
+                       size="1280x960", provider="camd",
                        resumed=cam_top_activity(name) or top,
                        devices=cam_devices(name), error=err, camd=True,
                        recovered=recovered, camera_open=open0,
@@ -5697,6 +5726,8 @@ class Handler(BaseHTTPRequestHandler):
                     geom["rotate"] = int(body.get("rotate") or 0)
             except (TypeError, ValueError):
                 pass
+            if body.get("both") is not None:
+                geom["both"] = bool(body.get("both"))
             if body.get("mirror") is not None:
                 geom["mirror"] = bool(body.get("mirror"))
             try:

@@ -1,10 +1,12 @@
 #!/bin/bash
 # g98-camd prep: make sure the per-instance v4l2loopback nodes exist as real
-# character devices with a pinned YU12 640x480 format.  camd writes raw frames
+# character devices with a pinned YU12 ${W}x${H} format.  camd writes raw frames
 # with plain write(); the format must already be YU12 or the Android side
 # decodes raw YUV as JPEG (torn green/purple output).
 set -u
 NODES="${G98_CAMD_NODES:-/dev/video20,/dev/video21,/dev/video22,/dev/video23,/dev/video24,/dev/video25,/dev/video26,/dev/video27,/dev/video28,/dev/video29}"
+W="${G98_CAMD_W:-1280}"
+H="${G98_CAMD_H:-960}"
 
 # 1. Make sure the module owns the 20..31 range.  Reusing a module loaded with
 #    the old 10..15 layout silently gives us no per-instance nodes, so check the
@@ -49,13 +51,22 @@ for node in $NODES; do
   [ -c "$node" ] || { echo "g98-camd-prep: skip $node (not a char device)"; continue; }
   fmt=$(cat /sys/devices/virtual/video4linux/$(basename "$node")/format 2>/dev/null || true)
   case "$fmt" in
-    YU12:640x480*) ;;
+    YU12:${W}x${H}*) ;;
     *)
-      # One short ffmpeg run does VIDIOC_S_FMT with YU12/640x480; keep_format then holds it.
-      timeout 3 /root/ffmpeg -hide_banner -loglevel error -re -f lavfi \
-        -i testsrc2=size=640x480:rate=10 -vf format=yuv420p -t 0.5 -f v4l2 "$node" >/dev/null 2>&1 || true
+      # v4l2loopback drops an S_FMT while keep_format is set and resets the
+      # format when the last writer closes, so a plain "ffmpeg -f v4l2" can
+      # never change the size.  Stream the new size, lock keep_format from a
+      # second opener while the writer still holds it, then let it exit.
+      /root/keepf "$node" 0 >/dev/null 2>&1 || true
+      timeout 10 /root/ffmpeg -hide_banner -loglevel error -re -f lavfi \
+        -i testsrc2=size=${W}x${H}:rate=10 -vf format=yuv420p -t 4 -f v4l2 "$node" >/dev/null 2>&1 &
+      _ff=$!
+      sleep 2
+      /root/keepf "$node" 1 >/dev/null 2>&1 || true
+      wait $_ff 2>/dev/null || true
       ;;
   esac
   /root/keepf "$node" 1 >/dev/null 2>&1 || true
+  echo "g98-camd-prep: $node $(cat /sys/devices/virtual/video4linux/$(basename "$node")/format 2>/dev/null)"
 done
 exit 0

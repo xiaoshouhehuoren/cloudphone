@@ -68,10 +68,16 @@ def is_char(path):
 
 
 def device0_open(name):
+    """True when the camera app holds an open device.
+
+    The stock Camera2 app remembers the last lens it used, so after a manual
+    front-camera test it opens Device 1; injection covers both nodes, so any
+    open device (0 or 1) means the session is live.
+    """
     _, out, _ = run([DOCKER, "exec", name, "dumpsys", "media.camera"])
-    if "Device 0 is open" in out:
+    if re.search(r"Device [01] is open", out):
         return True
-    if "Device 0 is closed" in out:
+    if "Device 0 is closed" in out and "Device 1 is closed" in out:
         return False
     return None
 

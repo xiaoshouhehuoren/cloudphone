@@ -94,6 +94,17 @@ def screen_bbox(path, w=1080, h=2400, top=560, bottom=420, thresh=30):
     return (cols[0], y0, cols[-1] + 2 - cols[0], y1 + 1 - y0)
 
 
+def peer_node(node):
+    """video20<->video21, video22<->video23, ... (back/front pair order)."""
+    try:
+        n = int(node.rstrip("/").rsplit("video", 1)[1])
+    except (IndexError, ValueError):
+        return None
+    if n < 20:
+        return None
+    return "/dev/video%d" % (n + 1 if (n - 20) % 2 == 0 else n - 1)
+
+
 def main():
     name, node, media = sys.argv[1], sys.argv[2], sys.argv[3]
     fit = sys.argv[4] if len(sys.argv) > 4 else "contain"
@@ -104,6 +115,14 @@ def main():
         body["ystretch"] = ystretch
     sh("curl -s -X POST %s/set -H 'Content-Type: application/json' -d '%s'"
        % (CAMD, json.dumps(body)))
+    # the camera app remembers the last-used lens: mirror the source onto the
+    # peer node (back<->front) so the measured screen is always our test media
+    peer = peer_node(node)
+    if peer:
+        pbody = dict(body)
+        pbody["node"] = peer
+        sh("curl -s -X POST %s/set -H 'Content-Type: application/json' -d '%s'"
+           % (CAMD, json.dumps(pbody)))
     sh("%s exec %s am force-stop com.android.camera2" % (DOCKER, name))
     sh("%s exec %s setprop ctl.restart vendor.camera-provider-2-4-legacy" % (DOCKER, name))
     import time

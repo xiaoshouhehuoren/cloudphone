@@ -28,7 +28,11 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-W, H = 640, 480
+# Node/output resolution.  4:3 like the original 640x480 so the app's preview
+# stretch factor measured on wx1 (YSTRETCH below) stays valid; 1280x960 is
+# 4x the pixels of VGA, which is what actually makes the preview sharp.
+W = int(os.environ.get("G98_CAMD_W", "1280"))
+H = int(os.environ.get("G98_CAMD_H", "960"))
 FRAME_SIZE = W * H * 3 // 2
 FPS = int(os.environ.get("G98_CAMD_FPS", "30"))
 # A reader that produces nothing within START_TIMEOUT seconds is restarted; a
