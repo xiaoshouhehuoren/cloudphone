@@ -29,6 +29,9 @@ python3 verify_api1_sizes.py || FAIL=1
 say "phone sensor sync (ws -> live file -> HAL)"
 python3 verify_sensor_sync.py wx1 || FAIL=1
 
+say "camd holds last frame when the rtsp source is silent"
+python3 verify_hold.py || FAIL=1
+
 say "camera end-to-end (wx1..wx5)"
 python3 verify_camera_e2e.py "$@" || FAIL=1
 

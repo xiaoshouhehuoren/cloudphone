@@ -38,7 +38,14 @@ FPS = int(os.environ.get("G98_CAMD_FPS", "30"))
 # A reader that produces nothing within START_TIMEOUT seconds is restarted; a
 # running source that goes silent for MAX_SILENCE seconds is restarted too.
 START_TIMEOUT = float(os.environ.get("G98_CAMD_START_TIMEOUT", "8"))
-MAX_SILENCE = float(os.environ.get("G98_CAMD_MAX_SILENCE", "10"))
+# 源静默多久才判定死掉并重连。重连会丢掉 ffmpeg 进程，而在重连的空窗里节点没有新帧；
+# 微信走的是旧版 Camera API（API1），它的 Camera2Client 把 HAL 的 RESULT 错误当致命错误，
+# 一旦节点断流就弹 "Failed to obtain configurations"。所以这里放宽到 30s：短抖动
+# （手机推流暂停/RTSP 卡顿）只让画面停住，不会反复重连。
+MAX_SILENCE = float(os.environ.get("G98_CAMD_MAX_SILENCE", "30"))
+# 源多久没有新帧就进入 hold（重复最后一帧）。比 MAX_SILENCE 小得多：1s 没新帧就
+# 说明推流断了/卡了，画面立即冻结在最后一帧，而不是等 30s 后重连。
+HOLD_AFTER = float(os.environ.get("G98_CAMD_HOLD_AFTER", "1.0"))
 IDLE_FPS = int(os.environ.get("G98_CAMD_IDLE_FPS", "5"))
 # 静态帧（idle/image）重复写的节拍。30fps 时 10 个 1280x960 节点要写约 550MB/s，
 # camd 自身 ~30% CPU、每台 provider ~17%；静态画面降频不影响观感，
@@ -536,6 +543,10 @@ class NodeRouter:
         self.mirror = MIRROR
         self.ystretch = YSTRETCH
         self.geo = geometry({}, self.fit, self.rotate, self.mirror, self.ystretch)
+        # 最后一次拿到“新”源帧的时间；超过 HOLD_AFTER 秒即认为源静默，写线程改为
+        # 原样重发最后一帧（hold），保证节点始终有新帧可 dequeue，HAL 不会超时。
+        self.last_frame_ts = 0.0
+        self.holding = False
         self.stop = threading.Event()
         self.writer = threading.Thread(target=self._write_loop, daemon=True)
         self.writer.start()
@@ -554,8 +565,28 @@ class NodeRouter:
         while not self.stop.is_set():
             t0 = time.time()
             with self.lock:
-                frame = self.static or self.frame
+                static = self.static
+                frame = static or self.frame
                 kind = self.kind
+                last_ts = self.last_frame_ts
+                holding = self.holding
+            # 源静默（推流断了/手机没推）时写线程仍旧按 30fps 重发最后一帧：
+            # 节点上永远有“新”buffer，HAL 的 capture request 不会 5s 超时，
+            # 微信这类 API1 客户端也就不会把会话判死。完全没有帧时补黑帧。
+            now = time.time()
+            silent = (static is None and frame is not None and last_ts > 0
+                      and now - last_ts > HOLD_AFTER)
+            if silent and not holding:
+                with self.lock:
+                    self.holding = True
+                print("camd: %s source silent %.1fs, holding last frame" %
+                      (self.node, now - last_ts), flush=True)
+            elif holding and not silent:
+                with self.lock:
+                    self.holding = False
+                print("camd: %s source resumed" % self.node, flush=True)
+            if frame is None and kind not in (None, "idle"):
+                frame = blank_frame()
             if frame is not None:
                 try:
                     # Blocking write: v4l2loopback only accepts one frame when a
@@ -605,6 +636,7 @@ class NodeRouter:
     def _on_frame(self, frame):
         with self.lock:
             self.frame = frame
+            self.last_frame_ts = time.time()
             self.seq += 1
 
     def set_source(self, kind, arg, fit=None, rotate=None, mirror=None,
@@ -677,7 +709,27 @@ class NodeRouter:
                                    if (self.decoder or self.reader) else 0,
                 "source_dropped": (self.decoder or self.reader).dropped
                                   if (self.decoder or self.reader) else 0,
+                # 源静默时写线程重复最后一帧，written 继续增长而 source_frames 不动。
+                "holding": self.holding,
+                "last_frame_age": (round(time.time() - self.last_frame_ts, 2)
+                                   if self.last_frame_ts else None),
             }
+
+
+_BLANK = None
+
+
+def blank_frame():
+    """一片纯黑的 YUV420p 帧（Y=16, UV=128）。
+
+    源从没产出过帧时（对象存储/推流还没起来）写线程没有可重复的“最后一帧”，
+    节点就会彻底断流，旧版相机 API 的客户端随即报错。用一帧黑顶上，保持节点
+    在 30fps 有 buffer 可 dequeue，等真帧到了再被覆盖。
+    """
+    global _BLANK
+    if _BLANK is None:
+        _BLANK = bytes([16]) * (W * H) + bytes([128]) * (W * H // 2)
+    return _BLANK
 
 
 def set_keepf(node, val):
