@@ -1,5 +1,6 @@
 *.so
 *.apk
+!deploy/apk/ADBKeyboard.apk
 *.o
 *.png
 *.jpg
