@@ -20,6 +20,10 @@ COPY artifacts/g98_sensors_trace.bin.gz /vendor/etc/g98_sensors_trace.bin.gz
 # --- VINTF: declare the sensors/gnss AIDL HALs, otherwise SensorService
 #     ignores the registered HAL ("No Sensors on the device", devInitCheck -19)
 COPY artifacts/vintf-manifest.xml /vendor/etc/vintf/manifest.xml
+# --- media_profiles: h264/h263/m4v VideoEncoderCap raised to 1920x1440 so the
+#     legacy camera API1 (WeChat face verification) can build its size lists
+#     for the 1280x960 v4l2 nodes (stock caps at 1280x720 -> empty list -> -22)
+COPY artifacts/media_profiles_V1_0.xml /vendor/etc/media_profiles_V1_0.xml
 # --- camera provider init overrides (per-instance nodes injected at boot)
 COPY artifacts/android.hardware.camera.provider@2.4-service.rc /vendor/etc/init/android.hardware.camera.provider@2.4-service.rc
 COPY artifacts/android.hardware.camera.provider@2.7-external-service.rc /vendor/etc/init/android.hardware.camera.provider@2.7-external-service.rc

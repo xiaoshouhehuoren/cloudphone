@@ -53,4 +53,9 @@ pull /vendor/bin/g98-sensors.sh
 pull /vendor/etc/vintf/manifest.xml
 mv -f "$D/manifest.xml" "$D/vintf-manifest.xml"
 pull /vendor/etc/g98_sensors_trace.bin.gz
+# The legacy camera API (API1: WeChat face verification, QR scanners) derives its
+# video-size upper bound from <VideoEncoderCap maxFrameWidth/maxFrameHeight>; the
+# stock file caps at 1280x720, so a 1280x960 node yields an empty size list and
+# cameraserver fails with "generated preview size list is empty!!" (-22 / -19).
+pull /vendor/etc/media_profiles_V1_0.xml
 echo "done: $(ls -1 "$D" | wc -l) artifacts"

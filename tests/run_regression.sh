@@ -23,6 +23,9 @@ say "dashboard material library API"
 say "sensor stack (fake HAL, 10 h/w sensors per instance)"
 python3 verify_sensors.py || FAIL=1
 
+say "legacy camera API1 size lists (media_profiles VideoEncoderCap vs 1280x960 nodes)"
+python3 verify_api1_sizes.py || FAIL=1
+
 say "phone sensor sync (ws -> live file -> HAL)"
 python3 verify_sensor_sync.py wx1 || FAIL=1
 

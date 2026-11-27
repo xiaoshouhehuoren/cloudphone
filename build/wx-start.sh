@@ -23,6 +23,17 @@ create() {
     ro.build.flavor="$FLAVOR" ro.build.product="$DEVICE" ro.build.type=user ro.build.tags=release-keys \
     ro.serialno="$S" ro.boot.serialno="$S" ro.build.fingerprint="$FP" >/dev/null
 }
+ensure_adbkeyboard() {
+  # 容器是 docker run 重建的，装过的 IME 会丢：从 /srv/redroid/apk 补装。
+  # 只安装 + enable，不改默认输入法（改了 WeChat 侧容易看出被接管）。
+  local APK="${G98_APK_DIR:-/srv/redroid/apk}/ADBKeyboard.apk"
+  docker exec "$C" ime list -s 2>/dev/null | grep -q adbkeyboard && return 0
+  [ -f "$APK" ] || return 0
+  docker cp "$APK" "$C:/data/local/tmp/ADBKeyboard.apk" >/dev/null 2>&1 || return 0
+  docker exec "$C" pm install -r /data/local/tmp/ADBKeyboard.apk >/dev/null 2>&1 || return 0
+  docker exec "$C" ime enable com.android.adbkeyboard/.AdbIME >/dev/null 2>&1 || true
+  echo "adbkeyboard installed for $C"
+}
 ensure_sensors() {
   # 基础镜像没有传感器栈时，从板子上的 artifacts 补齐再重启一次：
   # dex + init rc + 启动器 + 真机 SENC trace + VINTF 声明。
@@ -35,8 +46,8 @@ ensure_sensors() {
   mkdir -p "$DR/local/tmp" 2>/dev/null || true
   [ -s "$DR/local/tmp/g98-sensors-seed.txt" ] || printf '%s' "$C" > "$DR/local/tmp/g98-sensors-seed.txt" 2>/dev/null || true
   if docker exec "$C" test -f /vendor/etc/g98-sensors.dex 2>/dev/null; then
-    # 已装过的实例也刷新 init rc：新版 rc 把启动时机从 "on boot" 改成
-    # "on property:sys.boot_completed=1"，否则假 HAL 会在开机阶段把 system_server 卡住。
+    # 已装过的实例也刷新 init rc / 启动器（rc 里是 "on boot start" + boot_completed
+    # 幂等兜底：只用 boot_completed 会与 system_server 启动时同步等 ISensors 互相死锁）。
     docker cp "$A/g98-sensors.rc" "$C:/vendor/etc/init/g98-sensors.rc" >/dev/null 2>&1 || true
     docker cp "$A/g98-sensors.sh" "$C:/vendor/bin/g98-sensors.sh" >/dev/null 2>&1 || true
     return 0
@@ -56,6 +67,17 @@ ensure_sensors() {
     [ "$(docker exec "$C" getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
     sleep 2
   done
+}
+
+ensure_media_profiles() {
+  # 旧版相机 API（API1：微信人脸验证、扫码）的预览/录像尺寸上限来自
+  # media_profiles 的 <VideoEncoderCap maxFrameWidth/maxFrameHeight>；原厂是 1280x720，
+  # 小于我们的 1280x960 节点 → getFilteredSizes 返回空 → "generated preview size list
+  # is empty!!" (-22) → App 看到 Failed to initialize camera。补丁版放宽到 1920x1440。
+  local A=/root/artifacts
+  [ -f "$A/media_profiles_V1_0.xml" ] || return 0
+  docker cp "$A/media_profiles_V1_0.xml" "$C:/vendor/etc/media_profiles_V1_0.xml" >/dev/null 2>&1 || true
+  docker exec "$C" chmod 644 /vendor/etc/media_profiles_V1_0.xml >/dev/null 2>&1 || true
 }
 
 configure_camera() {
@@ -148,7 +170,12 @@ done
 [ "$B" = "1" ] || { echo "$C boot timeout" >&2; exit 1; }
 # Harden: remove root/adb helpers and ADB keyboard; keep LatinIME for login.
 docker exec "$C" sh -c 'for p in /system/xbin/su /system/bin/su /sbin/su /su/bin/su /system/sbin/su; do rm -f "$p"; done' || true
-docker exec "$C" pm uninstall --user 0 com.android.adbkeyboard >/dev/null 2>&1 || true
+# ADBKeyboard：控制台用广播打中文（input text 只支持 ASCII）。
+# 默认输入法保持 LatinIME，只有 /api/text 遇到非 ASCII 时才临时切过去再切回来，
+# 因此它平时是“装但不启用”的状态。想彻底不留痕迹可设 G98_DROP_ADB_IME=1。
+if [ "${G98_DROP_ADB_IME:-0}" = "1" ]; then
+  docker exec "$C" pm uninstall --user 0 com.android.adbkeyboard >/dev/null 2>&1 || true
+fi
 docker exec "$C" settings put secure default_input_method com.android.inputmethod.latin/.LatinIME || true
 docker exec "$C" settings put global adb_enabled 0 || true
 docker exec "$C" setprop service.adb.tcp.port "" || true
@@ -171,7 +198,9 @@ docker exec "$C" settings put global device_name "WX$N" 2>/dev/null || true
 docker exec "$C" settings put secure bluetooth_name "WX$N" 2>/dev/null || true
 docker exec "$C" settings put global adb_enabled 0 2>/dev/null || true
 docker exec "$C" am force-stop com.android.camera2 >/dev/null 2>&1 || true
+ensure_adbkeyboard
 ensure_sensors
+ensure_media_profiles
 configure_camera
 start_touch
 sleep 2
