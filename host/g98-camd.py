@@ -51,6 +51,15 @@ STATIC_FPS = int(os.environ.get("G98_CAMD_STATIC_FPS", "12"))
 FIT = os.environ.get("G98_CAMD_FIT", "contain")
 ROTATE = int(os.environ.get("G98_CAMD_ROTATE", "0"))
 MIRROR = os.environ.get("G98_CAMD_MIRROR", "0") == "1"
+# 前置节点默认预翻转：Android 相机 App 的取景器会把自己摄像头画面做左右镜像，
+# 注入的视频/图片如果原样送进去就会"左右反了"。前置节点（20+2(N-1)+1，均为奇数）
+# 默认 hflip 一次抵消 App 的镜像，后置保持不变。
+AUTOFRONT = os.environ.get("G98_CAMD_AUTOFRONT_MIRROR", "1") == "1"
+
+
+def node_is_front(node):
+    m = re.search(r"(\d+)\s*$", node or "")
+    return bool(m) and int(m.group(1)) % 2 == 1
 # The stock camera app stretches the 640x480 node buffer onto a portrait preview
 # surface (measured on wx1: 640x480 -> 1080x1378, so vertical is 1.70x the
 # horizontal scale).  Pre-compensating in the buffer keeps circles round and
@@ -105,9 +114,11 @@ def ystretch_filter(ys):
     return "scale=w='trunc(iw*%.6f/2)*2':h=ih" % ys
 
 
-def jpeg_vf():
+def jpeg_vf(mirror=False):
     # 尺寸无关：手机推来的 JPEG 可能是任意分辨率，先横向预拉伸再 standard fit。
     parts = []
+    if mirror:
+        parts.append("hflip")
     ys = ystretch_filter(YSTRETCH)
     if ys:
         parts.append(ys)
@@ -117,10 +128,10 @@ def jpeg_vf():
     return ",".join(parts)
 
 
-def jpeg_one_cmd(path):
+def jpeg_one_cmd(path, mirror=False):
     """Decode ONE JPEG file into one YU12 frame (about 44 ms per frame)."""
     return [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "mjpeg",
-            "-i", path, "-vf", jpeg_vf(), "-f", "rawvideo",
+            "-i", path, "-vf", jpeg_vf(mirror), "-f", "rawvideo",
             "-pix_fmt", "yuv420p", "-"]
 
 
@@ -438,10 +449,11 @@ class Reader(threading.Thread):
 class JpegDecoder(threading.Thread):
     """Decode pushed JPEG frames into YU12 frames, one ffmpeg per frame."""
 
-    def __init__(self, node, on_frame):
+    def __init__(self, node, on_frame, mirror=False):
         super().__init__(daemon=True)
         self.node = node
         self.on_frame = on_frame
+        self.mirror = bool(mirror)
         self.q = queue.Queue(maxsize=1)
         self.stop = threading.Event()
         self.frames = 0
@@ -477,8 +489,8 @@ class JpegDecoder(threading.Thread):
             try:
                 with open(self.tmp, "wb") as fh:
                     fh.write(data)
-                res = subprocess.run(jpeg_one_cmd(self.tmp), capture_output=True,
-                                     timeout=5)
+                res = subprocess.run(jpeg_one_cmd(self.tmp, self.mirror),
+                                     capture_output=True, timeout=5)
                 if len(res.stdout) == FRAME_SIZE:
                     self.frames += 1
                     self.on_frame(res.stdout)
@@ -598,7 +610,11 @@ class NodeRouter:
         src = probe_media(arg) if kind in ("image", "video") else {}
         fit = (fit or self.fit or FIT)
         rotate = self.rotate if rotate is None else int(rotate)
-        mirror = self.mirror if mirror is None else bool(mirror)
+        if mirror is None:
+            # 前置节点默认预翻转，抵消相机 App 取景器的自拍镜像；后置保持原样。
+            mirror = bool(AUTOFRONT and node_is_front(self.node))
+        else:
+            mirror = bool(mirror)
         self.ystretch = YSTRETCH if ystretch is None else float(ystretch)
         geo = geometry(src, fit, rotate, mirror, self.ystretch)
         with self.lock:
@@ -624,7 +640,7 @@ class NodeRouter:
         with self.lock:
             self.static = None
         if kind == "jpeg":
-            dec = JpegDecoder(self.node, self._on_frame)
+            dec = JpegDecoder(self.node, self._on_frame, self.mirror)
             with self.lock:
                 self.reader, self.decoder = None, dec
             dec.start()

@@ -137,7 +137,16 @@ def wait_streaming(name, timeout=50.0):
 
 
 def watchdog_count(name):
-    _, out, _ = run([DOCKER, "exec", name, "logcat", "-d", "-b", "all"])
+    # 只抓 CameraServiceWatchdog 这个 tag 且只要最后 800 行：整包 logcat -d -b all
+    # 在跑久了的实例上能到几百 MB，dump 一次会超过 40s 超时把回归误判成失败。
+    # 日志抓取本身失败不应该判定相机坏掉，打警告后按 0 处理。
+    try:
+        _, out, _ = run([DOCKER, "exec", name, "logcat", "-d", "-b", "all",
+                         "-s", "CameraServiceWatchdog", "-t", "800"], timeout=20)
+    except Exception as exc:  # noqa: BLE001
+        print("[warn] %s: watchdog logcat unavailable (%s), assuming 0"
+              % (name, exc))
+        return 0
     return len(re.findall(r"CameraServiceWatchdog triggering abort", out))
 
 

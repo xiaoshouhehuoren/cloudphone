@@ -325,19 +325,24 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   // TODO(30510395): subcomponents focus/lens.
   // No way to actually get the aperture and focal length
   // in V4L2, but they're required keys, so fake them.
+  // Reference hardware: Redmi K50 (2022).  Back: 48MP IMX582, f/1.8, 26mm
+  // equivalent.  Front: 20MP, f/2.45.  Reporting the real phone's numbers
+  // keeps exposure/exif/FOV sane instead of "Raspberry Pi camera v2".
+  const bool k50_back = (id == 0);
   components.insert(
       NoEffectMenuControl<float>(ANDROID_LENS_APERTURE,
                                  ANDROID_LENS_INFO_AVAILABLE_APERTURES,
-                                 {2.0}));  // RPi camera v2 is f/2.0.
-  // Camera 0 is back-facing, camera 1 is front-facing.
+                                 {k50_back ? 1.8f : 2.45f}));
+  // Always assume external-facing.
   components.insert(
       std::unique_ptr<PartialMetadataInterface>(new Property<uint8_t>(
           ANDROID_LENS_FACING,
-          id == 0 ? ANDROID_LENS_FACING_BACK : ANDROID_LENS_FACING_FRONT)));
+                                            id == 0 ? ANDROID_LENS_FACING_BACK
+                                                    : ANDROID_LENS_FACING_FRONT)));
   components.insert(
       NoEffectMenuControl<float>(ANDROID_LENS_FOCAL_LENGTH,
                                  ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
-                                 {3.04}));  // RPi camera v2 is 3.04mm.
+                                 {k50_back ? 4.74f : 3.30f}));  // K50 26mm/23mm equiv.
   // No known way to get filter densities from V4L2,
   // report 0 to indicate this control is not supported.
   components.insert(
@@ -478,7 +483,10 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
       new Property<uint8_t>(ANDROID_SCALER_CROPPING_TYPE,
                             ANDROID_SCALER_CROPPING_TYPE_FREEFORM)));
   // Spoof pixel array size for now, eventually get from CROPCAP.
-  std::array<int32_t, 2> pixel_array_size = {{3280, 2464}};
+  // K50: 48MP back (8000x6000), 20MP front (5184x3888) - 4:3 like the node.
+  std::array<int32_t, 2> pixel_array_size =
+      k50_back ? std::array<int32_t, 2>{{8000, 6000}}
+               : std::array<int32_t, 2>{{5184, 3888}};
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<std::array<int32_t, 2>>(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
                                            pixel_array_size)));
@@ -499,7 +507,8 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   // pixel pitch, etc.), so faking it may have unexpected results.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<std::array<float, 2>>(ANDROID_SENSOR_INFO_PHYSICAL_SIZE,
-                                         {{3.674, 2.760}})));
+                                         {{k50_back ? 6.40f : 4.60f,
+                                           k50_back ? 4.80f : 3.45f}})));
   // HAL uses BOOTTIME timestamps.
   // TODO(b/29457051): make sure timestamps are consistent throughout the HAL.
   components.insert(std::unique_ptr<PartialMetadataInterface>(

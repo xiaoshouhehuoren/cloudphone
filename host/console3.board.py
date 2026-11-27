@@ -1599,6 +1599,12 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
           <option value="1">开（默认，切前置也能看到）</option>
           <option value="0">关（只注入所选节点）</option>
         </select>
+        <label class="mini">前置镜像补偿（抵消相机 App 自拍镜像）</label>
+        <select id="cammir">
+          <option value="">自动（前置翻转，后置不翻）</option>
+          <option value="0">不翻转</option>
+          <option value="1">翻转（左右镜像）</option>
+        </select>
         <label class="mini">旋转</label>
         <select id="camrot">
           <option value="0">不旋转</option>
@@ -2652,8 +2658,11 @@ function camStartWS(){
 }
 function camFitOpts(){
   var fitEl=el('camfit'), rotEl=el('camrot'), bothEl=el('camboth');
+  var mirEl=el('cammir');
   var o={fit: fitEl?fitEl.value:'contain'};
   if(rotEl) o.rotate=parseInt(rotEl.value,10)||0;
+  // 空值 = 自动：camd 按节点奇偶给前置做左右翻转，抵消相机 App 的取景器镜像。
+  if(mirEl && mirEl.value !== '') o.mirror = mirEl.value === '1';
   o.both = bothEl ? bothEl.value !== '0' : true;
   return o;
 }

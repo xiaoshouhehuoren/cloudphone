@@ -114,9 +114,21 @@ int V4L2Camera::flushBuffers() {
   HAL_LOG_ENTER();
   // Wait for an in-progress DequeueRequest to finish before tearing the stream
   // down; otherwise StreamOff() can drop the request underneath the dequeue
-  // thread while it is still mapping output buffers.
-  std::lock_guard<std::mutex> guard(in_flight_lock_);
-  return device_->StreamOff();
+  // thread while it is still mapping output buffers.  The lock is never held
+  // across the framework upcall (see dequeueRequestBuffers), so this cannot
+  // deadlock against a closing session.
+  std::unique_lock<std::mutex> lock(in_flight_lock_);
+  tear_down_ = true;
+  buffers_in_flight_.notify_all();
+  int res = device_->StreamOff();
+  lock.unlock();
+  // A failed STREAMOFF must not abort the teardown: Camera::close() still has to
+  // call disconnect() so the v4l2 fd is released and the next open works.
+  if (res) {
+    HAL_LOGW("StreamOff during flush failed: %d (continuing teardown)", res);
+    return 0;
+  }
+  return 0;
 }
 
 int V4L2Camera::initStaticInfo(android::CameraMetadata* out) {
@@ -272,25 +284,38 @@ bool V4L2Camera::enqueueRequestBuffers() {
 bool V4L2Camera::dequeueRequestBuffers() {
   // Dequeue a buffer.
   std::shared_ptr<default_camera_hal::CaptureRequest> request;
-  int res;
+  int res = 0;
+  bool have_frame = false;
 
   {
     std::unique_lock<std::mutex> lock(in_flight_lock_);
     res = device_->DequeueRequest(&request);
-    if (!res) {
-      if (request) {
-        completeRequest(request, res);
-        in_flight_buffer_count_--;
-      }
-      return true;
+    if (!res && request) {
+      in_flight_buffer_count_--;
+      have_frame = true;
     }
+  }
+
+  // Hand the frame to the framework OUTSIDE in_flight_lock_.  completeRequest()
+  // is a synchronous upcall into the provider session; when the app is being
+  // torn down that upcall can block until the session close finishes, while the
+  // closing thread is stuck in Camera::flush() -> flushBuffers() waiting for
+  // this very lock.  That deadlock left the /dev/videoN fd open in the HAL
+  // (mBusy stayed true) and every later open returned -EBUSY (-16), which is
+  // the "Camera error / Can't connect to the camera" seen on the front camera.
+  if (have_frame) {
+    completeRequest(request, 0);
+    return true;
+  }
+  if (!res) {
+    return true;
   }
 
   if (res == -EAGAIN) {
     // EAGAIN just means nothing to dequeue right now.
     // Wait until something is available before looping again.
     std::unique_lock<std::mutex> lock(in_flight_lock_);
-    while (in_flight_buffer_count_ == 0) {
+    while (in_flight_buffer_count_ == 0 && !tear_down_) {
       buffers_in_flight_.wait(lock);
     }
   } else {
@@ -325,6 +350,7 @@ int V4L2Camera::setupStreams(camera3_stream_configuration_t* stream_config) {
     return -EINVAL;
   }
   in_flight_buffer_count_ = 0;
+  tear_down_ = false;
 
   // stream_config should have been validated; assume at least 1 stream.
   // V4L2 can only be configured for one format/size at a time, so one stream

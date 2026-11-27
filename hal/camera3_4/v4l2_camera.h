@@ -103,6 +103,9 @@ class V4L2Camera : public default_camera_hal::Camera {
   android::sp<android::Thread> buffer_dequeuer_;
   std::condition_variable requests_available_;
   std::condition_variable buffers_in_flight_;
+  // Set while flushBuffers() runs so the dequeue thread stops waiting on
+  // buffers_in_flight_ instead of sleeping forever during a teardown.
+  bool tear_down_ = false;
 
   int32_t max_input_streams_;
   std::array<int, 3> max_output_streams_;  // {raw, non-stalling, stalling}.
