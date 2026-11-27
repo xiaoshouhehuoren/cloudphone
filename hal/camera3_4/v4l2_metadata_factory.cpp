@@ -482,6 +482,11 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<std::array<int32_t, 4>>(
           ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE, active_array_size)));
+  // Real K50 sensors are Bayer RGGB; without this tag some camera stacks treat
+  // the device as monochrome / unknown and skip or mis-handle color pipelines.
+  components.insert(std::unique_ptr<PartialMetadataInterface>(
+      new Property<uint8_t>(ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT,
+                            ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB)));
   // This is really more freeform than a menu control, but since we're
   // restricting it to not being used anyways this works for now.
   components.insert(NoEffectMenuControl<std::array<int32_t, 4>>(
@@ -502,9 +507,10 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
                             ANDROID_SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME)));
   components.insert(std::make_unique<State<int64_t>>(
       ANDROID_SENSOR_TIMESTAMP, std::make_unique<BoottimeStateDelegate>()));
-  // No way to actually get shutter skew from V4L2.
-  components.insert(
-      FixedState<int64_t>(ANDROID_SENSOR_ROLLING_SHUTTER_SKEW, 0));
+  // Estimated from the 30fps stream period: a real rolling shutter exposes
+  // rows over most of the frame interval, so report ~2/3 of it instead of 0.
+  components.insert(FixedState<int64_t>(
+      ANDROID_SENSOR_ROLLING_SHUTTER_SKEW, k50_back ? 22000000 : 18000000));
   // No way to actually get orientation from V4L2.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<int32_t>(ANDROID_SENSOR_ORIENTATION, 0)));
