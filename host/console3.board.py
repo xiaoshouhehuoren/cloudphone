@@ -4423,20 +4423,35 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
         if cam_devices(name) < 2:
             cam_camera_stop(name)
             cam_camera_start(name, launch=False)
+        if kind == "stream":
+            # 手机直播流要等 WHIP 推上来才有帧；没帧时节点读不到 buffer，
+            # App 必然打不开，此时走恢复流程只会白等 25s（观感就是“很卡”）。
+            _fs = time.time() + 8.0
+            while time.time() < _fs:
+                _ns = cam_camd_node_state(node) or {}
+                if (_ns.get("source_frames") or 0) > 0:
+                    break
+                time.sleep(0.4)
         cam_camera_start(name, launch=True)
         top = cam_wait_resumed(name, "com.android.camera2/", 6.0) or top
         # The app needs a moment to actually open the device; checking once
         # right after 'am start' made every cold start fall into a full camera
         # stack recovery (~25 s). Poll briefly first.
-        _open_deadline = time.time() + 10.0
+        _open_deadline = time.time() + (20.0 if kind == "stream" else 10.0)
         while time.time() < _open_deadline:
             if cam_device0_open(name) is True:
                 break
             time.sleep(0.4)
         if cam_device0_open(name) is not True:
-            _alog("cam start(camd) %s: device0 not open after launch, recovering" % name)
-            cam_recover(name)
-            recovered = True
+            _ns = cam_camd_node_state(node) or {}
+            if kind == "stream" and (_ns.get("source_frames") or 0) == 0:
+                # 源还没出帧：恢复相机栈也没用，保留状态让页面重试推流。
+                _alog("cam start(camd) %s: waiting for stream frames (%s)" % (name, node))
+                err = "等待手机直播流（节点还没有帧）"
+            else:
+                _alog("cam start(camd) %s: device0 not open after launch, recovering" % name)
+                cam_recover(name)
+                recovered = True
             top = cam_wait_resumed(name, "com.android.camera2/", 6.0) or top
     t2 = time.time()
     open0 = cam_device0_open(name)

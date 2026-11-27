@@ -40,6 +40,10 @@ FPS = int(os.environ.get("G98_CAMD_FPS", "30"))
 START_TIMEOUT = float(os.environ.get("G98_CAMD_START_TIMEOUT", "8"))
 MAX_SILENCE = float(os.environ.get("G98_CAMD_MAX_SILENCE", "10"))
 IDLE_FPS = int(os.environ.get("G98_CAMD_IDLE_FPS", "5"))
+# 静态帧（idle/image）重复写的节拍。30fps 时 10 个 1280x960 节点要写约 550MB/s，
+# camd 自身 ~30% CPU、每台 provider ~17%；静态画面降频不影响观感，
+# 但低于 ~10fps 容易让 HAL 的 capture request 排队超过 5s(看门狗)，默认 12。
+STATIC_FPS = int(os.environ.get("G98_CAMD_STATIC_FPS", "12"))
 # How a source is fitted into the node's %dx%d frame.  contain = keep the whole
 # picture, black bars; cover = fill the node, crop the overflow; stretch = fill
 # and distort (only for deliberate testing).  rotate/mirror match what a phone
@@ -94,10 +98,23 @@ def render_static(cmd):
     return data[:FRAME_SIZE]
 
 
+def ystretch_filter(ys):
+    """横向预拉伸，让 buffer 内容的宽高比 = 源宽高比 × ys（抵消预览拉伸）。"""
+    if abs(ys - 1.0) < 0.001:
+        return None
+    return "scale=w='trunc(iw*%.6f/2)*2':h=ih" % ys
+
+
 def jpeg_vf():
-    return ("scale=%d:%d:force_original_aspect_ratio=decrease,"
-            "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p"
-            % (W, H, W, H))
+    # 尺寸无关：手机推来的 JPEG 可能是任意分辨率，先横向预拉伸再 standard fit。
+    parts = []
+    ys = ystretch_filter(YSTRETCH)
+    if ys:
+        parts.append(ys)
+    parts.append("scale=%d:%d:force_original_aspect_ratio=decrease" % (W, H))
+    parts.append("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black" % (W, H))
+    parts.append("format=yuv420p")
+    return ",".join(parts)
 
 
 def jpeg_one_cmd(path):
@@ -192,6 +209,9 @@ def geometry(src, fit=None, rotate=None, mirror=None, ystretch=None):
     cw, ch = max(2, cw - cw % 2), max(2, ch - ch % 2)
     return {
         "fit": fit,
+        # 直播流在 /set 时还没出帧，probe 拿不到真实尺寸；滤镜按输入分辨率动态
+        # 计算（force_original_aspect_ratio），这里的 content 只是占位值。
+        "dynamic": not src.get("width"),
         "ystretch": round(ys, 4),
         "rotate": rotate,
         "mirror": bool(mirror),
@@ -218,20 +238,24 @@ def build_vf(geo, fps=None):
         chain.append("transpose=2")
     if geo["mirror"]:
         chain.append("hflip")
+    # 预拉伸之后用 ffmpeg 自己的 fit 函数，整套链路对输入分辨率无关：
+    # 手机直播流的实际尺寸往往在 /set 时还没就绪（probe 拿不到），
+    # 不能把 probe 出来的 1280x960 当成内容尺寸写死，否则画面被压扁/拉长。
+    pre = ystretch_filter(geo["ystretch"])
+    if pre:
+        chain.append(pre)
     if geo["fit"] == "stretch":
         chain.append("scale=%d:%d" % (W, H))
     elif geo["fit"] == "cover":
         # Cover scales past the frame and crops the overflow: the rawvideo
         # stream must stay exactly WxH or the writer reads misaligned frames.
-        chain.append("scale=%d:%d" % (geo["content_w"], geo["content_h"]))
-        chain.append("crop=%d:%d:%d:%d"
-                     % (W, H, -geo["content_x"], -geo["content_y"]))
+        chain.append("scale=%d:%d:force_original_aspect_ratio=increase"
+                     % (W, H))
+        chain.append("crop=%d:%d:(iw-ow)/2:(ih-oh)/2" % (W, H))
     else:
-        # Exact content rect: with pre-compensation this is not an
-        # aspect-preserving fit, so the verifier compares pixels directly.
-        chain.append("scale=%d:%d" % (geo["content_w"], geo["content_h"]))
-        chain.append("pad=%d:%d:%d:%d:color=black"
-                     % (W, H, geo["content_x"], geo["content_y"]))
+        chain.append("scale=%d:%d:force_original_aspect_ratio=decrease"
+                     % (W, H))
+        chain.append("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black" % (W, H))
     if fps:
         chain.append("fps=%d" % fps)
     chain.append("format=yuv420p")
@@ -558,7 +582,8 @@ class NodeRouter:
             # IDLE_FPS 降频是没有意义的，所以这里只对非静态源保留原逻辑。
             with self.lock:
                 is_static = self.static is not None
-            period = 1.0 / (FPS if (is_static or kind != "idle") else IDLE_FPS)
+            period = 1.0 / (STATIC_FPS if is_static
+                            else (FPS if kind != "idle" else IDLE_FPS))
             dt = period - (time.time() - t0)
             if dt > 0:
                 time.sleep(dt)
