@@ -8,6 +8,7 @@ if [ -z "${ART:-}" ] || [ ! -f "$ART/g98-sensors.dex" ]; then
   echo "artifacts dir missing g98-sensors.dex (run deploy/collect_artifacts.sh first)"; exit 1
 fi
 START="$HERE/../g98-sensors-start.sh"
+DATA_ROOT="${G98_DATA_ROOT:-/srv/redroid}"
 fail=0
 for c in $(docker ps --format '{{.Names}}' | grep -E '^wx[0-9]+$'); do
   printf '== %s ' "$c"
@@ -22,6 +23,11 @@ for c in $(docker ps --format '{{.Names}}' | grep -E '^wx[0-9]+$'); do
     docker cp "$ART/g98_sensors_trace.bin.gz" "$c:/vendor/etc/g98_sensors_trace.bin.gz" >/dev/null 2>&1 || echo -n "(trace cp failed) "
   fi
   docker cp "$START" "$c:/data/local/tmp/g98-sensors-start.sh" >/dev/null 2>&1 || { echo "cp start failed"; fail=1; continue; }
+  # 每台独立的传感器随机种子：HAL 用它决定 trace 相位、各轴偏置与光线缩放，
+  # 这样五台回放同一份真机 trace 也不会完全一致。容器 /data = 宿主 $DATA_ROOT/$c。
+  mkdir -p "$DATA_ROOT/$c/local/tmp" 2>/dev/null || true
+  printf '%s' "$c" > "$DATA_ROOT/$c/local/tmp/g98-sensors-seed.txt" 2>/dev/null || true
+  chmod 644 "$DATA_ROOT/$c/local/tmp/g98-sensors-seed.txt" 2>/dev/null || true
   docker cp "$HERE/../g98-vintf-patch.sh" "$c:/data/local/tmp/g98-vintf-patch.sh" >/dev/null 2>&1 || true
   docker exec "$c" /system/bin/sh /data/local/tmp/g98-vintf-patch.sh >/dev/null 2>&1 || true
   out=$(docker exec "$c" /system/bin/sh /data/local/tmp/g98-sensors-start.sh 2>&1 | tail -1)

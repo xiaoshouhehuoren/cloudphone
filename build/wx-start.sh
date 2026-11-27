@@ -26,7 +26,12 @@ ensure_sensors() {
   # dex + init rc + 启动器 + 真机 SENC trace + VINTF 声明。
   # 缺 VINTF 声明时 SensorService 会忽略已注册的 AIDL HAL（devInitCheck -19）。
   local A=/root/artifacts
+  local DR="${G98_DATA_ROOT:-/srv/redroid}/$C"
   [ -f "$A/g98-sensors.dex" ] || return 0
+  # 每台一个随机种子文件：HAL 读它决定 trace 相位偏移、各轴偏置与光线缩放，
+  # 避免五台回放同一份真机 trace 完全一致。缺文件时 HAL 会退回序列号/固定值。
+  mkdir -p "$DR/local/tmp" 2>/dev/null || true
+  [ -s "$DR/local/tmp/g98-sensors-seed.txt" ] || printf '%s' "$C" > "$DR/local/tmp/g98-sensors-seed.txt" 2>/dev/null || true
   if docker exec "$C" test -f /vendor/etc/g98-sensors.dex 2>/dev/null; then
     # 已装过的实例也刷新 init rc：新版 rc 把启动时机从 "on boot" 改成
     # "on property:sys.boot_completed=1"，否则假 HAL 会在开机阶段把 system_server 卡住。
