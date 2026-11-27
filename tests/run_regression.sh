@@ -23,6 +23,9 @@ say "dashboard material library API"
 say "sensor stack (fake HAL, 10 h/w sensors per instance)"
 python3 verify_sensors.py || FAIL=1
 
+say "phone sensor sync (ws -> live file -> HAL)"
+python3 verify_sensor_sync.py wx1 || FAIL=1
+
 say "camera end-to-end (wx1..wx5)"
 python3 verify_camera_e2e.py "$@" || FAIL=1
 

@@ -3185,6 +3185,198 @@ window.addEventListener('pagehide',function(){ try{ stopAll(true); }catch(e){} t
 if(q.get('auto')==='1'){ setTimeout(openCam, 300); }
 })();
 </script></body></html>"""
+
+MSENSOR = r"""<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#05080c">
+<title>传感器同步</title>
+<style>
+:root{--bg:#05080c;--panel:#0d1319;--panel2:#121a22;--line:#1e2a36;--txt:#dfe9f3;--mut:#8094a6;--ok:#2fd08a;--warn:#f0b429;--bad:#f2555a;--acc:#3ea6ff}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;padding:calc(10px + env(safe-area-inset-top)) 12px calc(18px + env(safe-area-inset-bottom))}
+h1{font-size:16px;margin:0}
+.sub{color:var(--mut);font-size:12px;margin-top:2px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:12px}
+.row{display:flex;align-items:center;gap:10px}
+.grow{flex:1}
+.sw{position:relative;width:52px;height:30px;border-radius:999px;background:#1d2937;border:1px solid var(--line);transition:background .18s;flex:0 0 auto}
+.sw i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#7c8b99;transition:transform .18s,background .18s}
+.sw.on{background:rgba(62,166,255,.22);border-color:#2f6d9e}
+.sw.on i{transform:translateX(22px);background:var(--acc)}
+.list{margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.item{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:9px 10px;font-size:13px}
+.item input{width:17px;height:17px;accent-color:var(--acc);margin:0}
+.item.na{opacity:.5}
+.item.na .nm::after{content:" 不支持";color:var(--mut);font-size:11px}
+.nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat{margin-top:10px;font-size:12.5px;color:var(--mut);min-height:20px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#4a5563;margin-right:6px;vertical-align:1px}
+.dot.on{background:var(--ok)}
+.dot.err{background:var(--bad)}
+.tip{margin-top:8px;font-size:11.5px;color:#6d8093}
+.btn{height:38px;padding:0 14px;border-radius:10px;border:1px solid #2f4a63;background:#142232;color:#dbe9f7;font-size:13px;font-weight:600}
+</style></head><body>
+<div class="row"><div class="grow"><h1>传感器同步</h1><div class="sub" id="devline">云手机 wx1</div></div>
+<div class="sw" id="sw"><i></i></div></div>
+<div class="card">
+  <div class="row"><b>推送到云机</b><div class="grow"></div><span id="mode" class="sub"></span></div>
+  <div class="list" id="list"></div>
+  <div class="stat"><span class="dot" id="dot"></span><span id="stat">未开启</span></div>
+  <div class="tip" id="tip">只有你打开上面的开关后，本机传感器数据才会发送给云手机；关闭即停止，云机回落到内置模拟数据。</div>
+</div>
+<div class="card" id="permcard" style="display:none">
+  <div class="row"><b>需要授权</b><div class="grow"></div><button class="btn" id="ask">授权/重试</button></div>
+  <div class="tip" id="permtip">浏览器要求先交互一次才允许读取传感器；iOS 还需在设置里允许“运动与方向”。</div>
+</div>
+<script>
+(function(){
+var q=new URLSearchParams(location.search);
+var DEV=q.get('device')||'wx1', TEST=q.get('test')==='1';
+var SLOTS=[['acc','加速度计',3],['gyro','陀螺仪',3],['mag','磁力计',3],['rv','旋转矢量',4],['grav','重力',3],['lin','线性加速度',3],['light','光线',1],['prox','距离',1],['pressure','气压',1],['step','计步',1]];
+var CTRL={acc:'Accelerometer',gyro:'Gyroscope',mag:'Magnetometer',rv:'AbsoluteOrientationSensor',grav:'GravitySensor',lin:'LinearAccelerationSensor',light:'AmbientLightSensor',prox:'ProximitySensor'};
+var have={}, enabled={}, reading={}, ctrls={}, ws=null, timer=null, t0=Date.now(), sent=0, got=0, mode='';
+document.getElementById('devline').textContent='云手机 '+DEV;
+function $(id){return document.getElementById(id)}
+function toast(m){var s=$('stat');s.textContent=m}
+function support(){
+  SLOTS.forEach(function(s){
+    var c=CTRL[s[0]];
+    have[s[0]]= !!(TEST || (c && window[c]));
+  });
+  if(!TEST && (window.DeviceMotionEvent||window.DeviceOrientationEvent)){ have.acc=have.acc||!!window.DeviceMotionEvent; have.rv=have.rv||!!window.DeviceOrientationEvent; }
+}
+function build(){
+  var l=$('list'); l.innerHTML='';
+  SLOTS.forEach(function(s){
+    var k=s[0], ok=have[k];
+    enabled[k]=ok;
+    var d=document.createElement('label');
+    d.className='item'+(ok?'':' na');
+    d.innerHTML='<input type="checkbox" data-k="'+k+'"'+(ok?' checked':'')+(ok?'':' disabled')+'><span class="nm">'+s[1]+'</span>';
+    l.appendChild(d);
+  });
+  l.addEventListener('change',function(e){
+    var k=e.target.getAttribute('data-k'); if(!k) return;
+    enabled[k]=e.target.checked;
+    if(ws&&ws.readyState===1) send(true);
+  });
+}
+function dot(cls){$('dot').className='dot'+(cls?' '+cls:'')}
+function wsOpen(){
+  if(ws&&(ws.readyState===0||ws.readyState===1)) return ws;
+  var proto=location.protocol==='https:'?'wss://':'ws://';
+  try{ ws=new WebSocket(proto+location.host+'/ws/sensor?name='+encodeURIComponent(DEV)); }catch(e){ dot('err'); toast('无法连接：'+e.message); return null; }
+  ws.onopen=function(){ dot('on'); toast('已连接，正在同步'); };
+  ws.onclose=function(){ if(timer){ dot(''); toast('已断开'); } };
+  ws.onerror=function(){ dot('err'); };
+  ws.onmessage=function(ev){ try{ var m=JSON.parse(ev.data); if(m&&m.type==='ack'){ got++; } }catch(e){} };
+  return ws;
+}
+function payload(){
+  var on=[], v={};
+  SLOTS.forEach(function(s){
+    var k=s[0]; if(!enabled[k]) return;
+    var a=reading[k]; if(!a||!a.length) return;
+    on.push(k); v[k]=a.slice(0,s[2]);
+  });
+  return {on:on, v:v, t:Date.now()};
+}
+function send(force){
+  if(!ws||ws.readyState!==1) return;
+  var p=payload(); if(!p.on.length) return;
+  ws.send(JSON.stringify(p)); sent++;
+}
+function startSensors(){
+  SLOTS.forEach(function(s){
+    var k=s[0]; if(!enabled[k]||ctrls[k]||!have[k]||TEST) return;
+    var c=CTRL[k]; if(!c||!window[c]) return;
+    try{
+      var ctl=new window[c]({frequency:25});
+      ctl.addEventListener('reading',function(){
+        var arr=[];
+        if(k==='rv'){ var qq=ctl.quaternion||[]; arr=[qq[0]||0,qq[1]||0,qq[2]||0,qq[3]||0]; }
+        else if(k==='light'||k==='prox'){ arr=[ctl.illuminance!=null?ctl.illuminance:(ctl.distance!=null?ctl.distance:0)]; }
+        else { arr=[ctl.x||0,ctl.y||0,ctl.z||0]; }
+        reading[k]=arr;
+      });
+      ctl.start(); ctrls[k]=ctl;
+    }catch(e){}
+  });
+}
+function stopSensors(){
+  Object.keys(ctrls).forEach(function(k){ try{ctrls[k].stop()}catch(e){} delete ctrls[k]; });
+}
+function motion(){
+  window.addEventListener('devicemotion',function(e){
+    var a=e.accelerationIncludingGravity||e.acceleration; if(a&&enabled.acc) reading.acc=[a.x||0,a.y||0,a.z||0];
+    var g=e.acceleration; if(g&&enabled.lin) reading.lin=[g.x||0,g.y||0,g.z||0];
+    var r=e.rotationRate; if(r&&enabled.gyro) reading.gyro=[(r.beta||0)*0.0174533,(r.gamma||0)*0.0174533,(r.alpha||0)*0.0174533];
+  },true);
+  window.addEventListener('deviceorientation',function(e){
+    if(!enabled.rv) return;
+    var z=(e.alpha||0)*0.0174533/2, x=(e.beta||0)*0.0174533/2, y=(e.gamma||0)*0.0174533/2;
+    var cz=Math.cos(z),sz=Math.sin(z),cx=Math.cos(x),sx=Math.sin(x),cy=Math.cos(y),sy=Math.sin(y);
+    reading.rv=[sx*cy*cz-cx*sy*sz, cx*sy*cz+sx*cy*sz, cx*cy*sz-sx*sy*cz, cx*cy*cz+sx*sy*sz];
+  },true);
+}
+function fake(){
+  setInterval(function(){
+    var t=(Date.now()-t0)/1000;
+    reading.acc=[1.25*Math.sin(t),1.25*Math.cos(t),9.8];
+    reading.gyro=[0.3*Math.sin(t*2),0.3*Math.cos(t*2),0.1];
+    reading.mag=[22*Math.cos(t),22*Math.sin(t),-42];
+    reading.rv=[0,0,Math.sin(t/2),Math.cos(t/2)];
+    reading.grav=[0,0,9.8];
+    reading.lin=[Math.sin(t),Math.cos(t),0];
+    reading.light=[Math.round(300+200*Math.sin(t))];
+    reading.prox=[0];
+    reading.pressure=[1013];
+    reading.step=[Math.round(t)];
+  },40);
+}
+function loop(){
+  if(timer) clearInterval(timer);
+  timer=setInterval(function(){ send(false); },40);
+}
+function on(){
+  $('sw').classList.add('on');
+  support(); build();
+  if(TEST){ mode='自测模式（合成数据）'; fake(); }
+  else { motion(); startSensors(); }
+  $('mode').textContent=mode;
+  wsOpen(); loop();
+  var deadline=Date.now()+2500;
+  (function check(){
+    if(!ws||ws.readyState!==1){ if(Date.now()<deadline) return setTimeout(check,200); }
+    else { send(true);
+      if(got===0 && !TEST) setTimeout(function(){ send(true); },300);
+    }
+  })();
+  toast('同步中 · '+(TEST?'合成':'本机')+'传感器');
+}
+function off(){
+  $('sw').classList.remove('on');
+  if(timer){ clearInterval(timer); timer=null; }
+  stopSensors();
+  try{ if(ws) ws.close(); }catch(e){}
+  ws=null; dot(''); toast('已停止同步');
+}
+$('sw').addEventListener('click',function(){ if($('sw').classList.contains('on')) off(); else on(); });
+$('ask').addEventListener('click',function(){
+  try{
+    if(window.DeviceMotionEvent&&DeviceMotionEvent.requestPermission) DeviceMotionEvent.requestPermission();
+    if(window.DeviceOrientationEvent&&DeviceOrientationEvent.requestPermission) DeviceOrientationEvent.requestPermission();
+  }catch(e){}
+  if(TEST||!('Accelerometer' in window)&&!(window.DeviceMotionEvent)) $('permtip').textContent='这个浏览器没有传感器接口：请用 Chrome（安卓）或 Safari（iOS），或改在云机内使用自测模式。';
+  if($('sw').classList.contains('on')) { off(); setTimeout(on,200); }
+});
+window.addEventListener('pagehide',function(){ try{ off(); }catch(e){} });
+support();
+if(!TEST && (!window.isSecureContext)) { $('permcard').style.display=''; $('permtip').textContent='当前不是 https 页面，部分浏览器会禁用传感器接口。请用控制台的 https 入口打开。'; }
+if(q.get('auto')==='1') setTimeout(on,300);
+})();
+</script></body></html>"""
 MPAGE = r"""<!doctype html><html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
@@ -3280,6 +3472,7 @@ html,body{margin:0;width:100%;height:100%;height:100dvh;overflow:hidden;backgrou
 <div class="db" id="kbtn"><span>⌨</span><em>键盘</em></div>
 <div class="db" id="cambtn"><span>◉</span><em>相机</em></div>
 <div class="db" id="locbtn"><span>◎</span><em>定位</em></div>
+<div class="db" id="sensebtn"><span>⌁</span><em>传感器</em></div>
 </div>
 <div id="camsheet" class="sheet"><div class="sh"><b>相机注入</b><button id="camclose">×</button></div>
 <div class="camtab"><button data-tab="live" class="on">手机实时</button><button data-tab="image">图片</button><button data-tab="video">视频</button></div>
@@ -3289,6 +3482,9 @@ html,body{margin:0;width:100%;height:100%;height:100dvh;overflow:hidden;backgrou
 <div class="seg"><button data-cnode="back" class="on">后置</button><button data-cnode="front">前置</button><button id="camidle">恢复空闲</button></div>
 </div>
 <div id="locsheet" class="sheet"><div class="sh"><b>云手机定位</b><button id="locclose">×</button></div><p>云手机默认用板子出口网线的位置。只有你点按钮才会改，改了会标记「人为设定」，不会自动跟随。</p><div id="locbadge" class="lbadge">板子默认（出口网线）</div><div class="fields"><div><label>纬度</label><input id="lat" inputmode="decimal"></div><div><label>经度</label><input id="lon" inputmode="decimal"></div></div><div class="fields" style="grid-template-columns:1fr"><div><label>海拔（米）</label><input id="alt" inputmode="decimal"></div></div><div class="row" style="grid-template-columns:1fr 1fr"><button class="primary" id="myloc">◎ 取我现在的位置</button><button id="boardloc">板子位置</button></div><div class="cities"><button data-city="39.9042,116.4074,50">北京</button><button data-city="31.2304,121.4737,10">上海</button><button data-city="22.5431,114.0579,20">深圳</button><button data-city="23.1291,113.2644,20">广州</button><button data-city="30.2741,120.1551,15">杭州</button></div><div class="row"><button id="locrefresh">刷新</button><button class="primary" id="locapply">应用定位</button></div><div id="loclog"></div></div>
+<div id="sensesheet" class="sheet"><div class="sh"><b>传感器同步</b><button id="senseclose">×</button></div>
+<iframe id="senseframe" allow="accelerometer; gyroscope; magnetometer; ambient-light-sensor; autoplay" style="width:100%;height:64vh;border:0;border-radius:12px;background:#05080c"></iframe>
+</div>
 <div id="toast"></div>
 </div>
 <script>
@@ -3364,6 +3560,9 @@ document.getElementById('camidle').addEventListener('click',function(){post('/ap
 document.getElementById('camimg').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'image');});
 document.getElementById('camvideo').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'video');});
 document.getElementById('cambtn').addEventListener('click',function(){openSheet('camsheet');camSheetTab('live');});
+function senseOpen(){var f=document.getElementById('senseframe');var qs=new URLSearchParams(location.search);f.src='/ms?device='+encodeURIComponent(DEV)+'&auto=1'+(K?'&k='+encodeURIComponent(K):'')+(qs.get('test')==='1'?'&test=1':'');openSheet('sensesheet');}
+document.getElementById('sensebtn').addEventListener('click',senseOpen);
+document.getElementById('senseclose').addEventListener('click',function(){var f=document.getElementById('senseframe');f.src='about:blank';closeSheets();});
 document.getElementById('camclose').addEventListener('click',function(){camHide();post('/api/cam/stop',{name:DEV,node:camNode()});});
 document.getElementById('camstart').addEventListener('click',camOpen);
 function locBadge(){
@@ -3707,6 +3906,63 @@ CAM_LOCK = threading.Lock()
 CAM_SEQ = threading.Lock()
 FFMPEG_BIN = "/root/ffmpeg" if os.path.exists("/root/ffmpeg") else "ffmpeg"
 CAM_DEFAULT_NODE = "/dev/video11"
+
+# 手机传感器实时同步：浏览器 /ws/sensor → 本文件的 180 字节小端结构 → 容器内假传感器 HAL 轮询。
+SENSOR_SLOTS = [("acc", 0), ("gyro", 1), ("mag", 2), ("rv", 3), ("grav", 4),
+                ("lin", 5), ("light", 6), ("prox", 7), ("pressure", 8), ("step", 9)]
+SENSOR_KEYS = dict(SENSOR_SLOTS)
+SENSOR_MAGIC = 0x4739384C
+SENSOR_NAMES = {"acc": "加速度计", "gyro": "陀螺仪", "mag": "磁力计", "rv": "旋转矢量",
+                "grav": "重力", "lin": "线性加速度", "light": "光线", "prox": "距离",
+                "pressure": "气压", "step": "计步"}
+
+
+def sensor_live_path(name):
+    return "/srv/redroid/%s/local/tmp/g98-sensors-live.bin" % name
+
+
+def sensor_write_live(name, on, vals):
+    """写 HAL 轮询的实时传感器文件：magic/ver/mask/wallMs + 10 槽 x 4 float。
+    mask 位为 1 的槽位用手机值，为 0 的槽位 HAL 继续回放真机 trace。"""
+    mask = 0
+    slots = [0.0] * 40
+    for k in (on or ()):
+        idx = SENSOR_KEYS.get(str(k))
+        if idx is None:
+            continue
+        mask |= 1 << idx
+        arr = (vals or {}).get(str(k)) or []
+        for j in range(min(4, len(arr))):
+            try:
+                slots[idx * 4 + j] = float(arr[j])
+            except (TypeError, ValueError):
+                slots[idx * 4 + j] = 0.0
+    blob = struct.pack("<iiIq40f", SENSOR_MAGIC, 1, mask, int(time.time() * 1000), *slots)
+    path = sensor_live_path(name)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    try:
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o666)
+    os.replace(tmp, path)
+    return mask
+
+
+def sensor_live_state(name):
+    path = sensor_live_path(name)
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(180)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+    if len(buf) < 24:
+        return {"ok": False, "error": "short file", "path": path}
+    magic, ver, mask, wall = struct.unpack_from("<iiIq", buf, 0)
+    age = time.time() - wall / 1000.0
+    return {"ok": magic == SENSOR_MAGIC and ver == 1, "mask": mask, "age": round(age, 2),
+            "on": [k for k, i in SENSOR_SLOTS if mask & (1 << i)], "path": path}
 
 
 def cam_nodes_for(name):
@@ -4724,6 +4980,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, "bad device", "text/plain; charset=utf-8")
             upstream = ("/ws/screen?device=" if p == "/ws/live" else "/ws/camera?device=") + quote(dev)
             return self._ws_tunnel(upstream)
+        if p == "/ws/sensor":
+            dev = (qs.get("name") or qs.get("device") or [""])[0]
+            if not NAME_RE.match(dev or ""):
+                return self._send(400, "bad name", "text/plain; charset=utf-8")
+            return self._ws_sensor(dev)
+        if p == "/api/sensors/live":
+            name = (qs.get("name") or qs.get("device") or ["wx1"])[0]
+            if not NAME_RE.match(name or ""):
+                return self._json({"error": "bad name"}, 400)
+            return self._json(sensor_live_state(name))
         if p == "/ws/input":
             dev = (qs.get("name") or qs.get("device") or [""])[0]
             if not NAME_RE.match(dev or ""):
@@ -4814,6 +5080,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "state": cam_state(name), "busy": cam_busy(name)})
         if p == "/cam":
             return self._send(200, CAMPAGE)
+        if p == "/ms":
+            return self._send(200, MSENSOR)
         if p == "/m":
             return self._send(200, MPAGE)
         if p == "/api/stream":
@@ -4944,6 +5212,79 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
 
+
+    def _ws_sensor(self, name):
+        """手机传感器通道：浏览器持续推送选中的传感器值 → 写实时文件给容器内假传感器 HAL。"""
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key:
+            return self._json({"error": "not a websocket"}, 400)
+        acc = base64.b64encode(hashlib.sha1(
+            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", acc)
+        self.end_headers()
+        self.close_connection = True
+        self._ws_send(json.dumps({"type": "hello", "device": name,
+                                  "slots": [k for k, _i in SENSOR_SLOTS]}))
+        last_ack = 0.0
+        try:
+            os.makedirs(os.path.dirname(sensor_live_path(name)), exist_ok=True)
+        except OSError:
+            pass
+        try:
+            while True:
+                b0, b1 = self._recvn(2)
+                op = b0 & 0x0F
+                masked = b1 & 0x80
+                ln = b1 & 0x7F
+                if ln == 126:
+                    ln = int.from_bytes(self._recvn(2), "big")
+                elif ln == 127:
+                    ln = int.from_bytes(self._recvn(8), "big")
+                mask_key = self._recvn(4) if masked else b"\x00\x00\x00\x00"
+                data = self._recvn(ln) if ln else b""
+                if masked and data:
+                    data = bytes(c ^ mask_key[i % 4] for i, c in enumerate(data))
+                if op == 0x8:
+                    return
+                if op == 0x9:
+                    self.connection.sendall(bytes([0x8A, len(data)]) + data)
+                    continue
+                if op != 0x1:
+                    continue
+                try:
+                    msg = json.loads(data.decode("utf-8", "replace"))
+                except Exception:  # noqa: BLE001
+                    continue
+                on = msg.get("on") or []
+                if not isinstance(on, list):
+                    on = []
+                vals = msg.get("v") or {}
+                if not isinstance(vals, dict):
+                    vals = {}
+                try:
+                    m = sensor_write_live(name, on, vals)
+                except OSError as exc:
+                    self._ws_send(json.dumps({"type": "error", "error": str(exc)}))
+                    time.sleep(0.2)
+                    continue
+                now = time.time()
+                if now - last_ack >= 1.0:
+                    last_ack = now
+                    self._ws_send(json.dumps({"type": "ack", "mask": m, "n": len(on)}))
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                sensor_write_live(name, [], {})
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.connection.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _whep(self, name):
         if not self._authed():

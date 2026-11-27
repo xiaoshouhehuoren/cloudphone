@@ -3,9 +3,13 @@ service g98-sensors /vendor/bin/g98-sensors.sh
     group root system
     disabled
 
-# 不能在 "on boot" 阶段启动：假传感器 HAL 的 FMQ 事件包格式不完整，SensorService
-# 会一直 "FMQ: The write or read pointer has become misaligned"，system_server 卡在
-# 启动阶段，boot_completed 永远为空，PackageManager 解析不出任何 Activity（相机 App
-# 直接报 "Activity class does not exist"）。等开机完成后再启动就只影响传感器本身。
+# 必须在 "on boot" 阶段就启动：system_server 启动时会同步等待
+# android.hardware.sensors.ISensors/default（VINTF 已声明），HAL 缺席会死锁在
+# "Waited one second for ... ISensors"，sys.boot_completed 永远为空、PackageManager
+# 解析不出任何 Activity。晚启动（on property:sys.boot_completed=1）已实测会卡死开机。
+on boot
+    start g98-sensors
+
+# 兜底：若 boot 阶段未起来，开机完成后再补一次（启动脚本自身幂等）。
 on property:sys.boot_completed=1
     start g98-sensors
