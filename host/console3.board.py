@@ -3298,11 +3298,12 @@ function openCam(){
 }
 startBtn.addEventListener('click',openCam);
 stopBtn.addEventListener('click',function(){ stopAll(false); });
-flipBtn.addEventListener('click',function(){
-  facing=(facing==='environment'?'user':'environment');
+function switchFacing(nf){
+  if(nf!=='user'&&nf!=='environment') return;
+  facing=nf;
   var nc=(facing==='environment'?'后置':'前置');
   log('切换摄像头：'+nc);
-  // 热切换：同一个 peer connection 上 replaceTrack，不重开推流、不重启云手机相机。
+  // 热切换：同一个 peer connection 上 replaceTrack，不重开推流、不重启云手机相机 App。
   if(!videoSender||!pc||pc.connectionState!=='connected'||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ openCam(); return; }
   navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720}}})
    .then(function(s){
@@ -3315,6 +3316,13 @@ flipBtn.addEventListener('click',function(){
      });
    })
    .catch(function(e){ log('热切换失败，改为重开摄像头：'+(e&&e.message?e.message:e)); openCam(); });
+}
+flipBtn.addEventListener('click',function(){ switchFacing(facing==='environment'?'user':'environment'); });
+// 宿主页（/m 的相机面板）点「前置/后置」时用 postMessage 通知本页，走同一条热切换路径，
+// 不重载 iframe、不重启云手机相机 App。
+window.addEventListener('message',function(e){
+  var d=e.data||{};
+  if(d&&d.cmd==='facing'&&(d.facing==='user'||d.facing==='environment')&&d.facing!==facing){ switchFacing(d.facing); }
 });
 document.getElementById('node').addEventListener('change',function(){ node=this.value; if(stream){ stopAll(true); openCam(); } });
 window.addEventListener('pagehide',function(){ try{ stopAll(true); }catch(e){} try{ navigator.sendBeacon('/api/cam/stop',new Blob([JSON.stringify({name:dev,node:node})],{type:'application/json'})); }catch(e){} });
@@ -3721,7 +3729,7 @@ function camHide(){var s=document.getElementById('camsheet');s.classList.remove(
 function camUpload(file,kind){var el=document.getElementById(kind==='image'?'imgstat':'vidstat');return new Promise(function(res,rej){var x=new XMLHttpRequest();x.open('POST','/api/cam/file');x.setRequestHeader('X-Filename',encodeURIComponent(file.name));x.upload.onprogress=function(e){if(e.lengthComputable)camStatus(el,'上传中 '+Math.round(e.loaded/e.total*100)+'%');};x.onload=function(){var j={};try{j=JSON.parse(x.responseText)}catch(e){}if(j&&j.path)res(j);else rej(new Error((j&&j.error)||'上传失败'));};x.onerror=function(){rej(new Error('网络错误'));};x.send(file);});}
 function camInjectFile(file,kind){if(!file)return;if(CAM.busy){toast('上一个注入还在进行中');return;}CAM.busy=true;var el=document.getElementById(kind==='image'?'imgstat':'vidstat');camStatus(el,file.name+' · 准备上传…');camUpload(file,kind).then(function(j){camStatus(el,'已上传，正在切源…');return post('/api/cam/start',{name:DEV,node:camNode(),path:j.path,kind:kind});}).then(function(j){if(j&&(j.ok||j.queued)){camStatus(el,'已注入 '+(kind==='image'?'图片':'视频')+'，云手机相机已切源',true);toast('已切换注入源');}else{camStatus(el,'注入失败：'+((j&&j.error)||'未知错误'),false);}}).catch(function(e){camStatus(el,'失败：'+(e&&e.message?e.message:e),false);}).then(function(){CAM.busy=false;setTimeout(cfgPoll,600);});}
 document.querySelectorAll('.camtab button').forEach(function(b){b.addEventListener('click',function(){camSheetTab(b.getAttribute('data-tab'))});});
-document.querySelectorAll('.seg [data-cnode]').forEach(function(b){b.addEventListener('click',function(){CAM.node=b.getAttribute('data-cnode');document.querySelectorAll('.seg [data-cnode]').forEach(function(x){x.classList.toggle('on',x===b)});var live=document.getElementById('camframe').classList.contains('show');if(live)camOpen();post('/api/cam/lens',{name:DEV,lens:CAM.node,launch:live}).then(function(j){if(j&&j.ok)toast('云手机已切到'+(CAM.node==='front'?'前置':'后置')+'摄像头');}).catch(function(){});toast((CAM.node==='front'?'前置':'后置')+'摄像头 · '+camNode());});});
+document.querySelectorAll('.seg [data-cnode]').forEach(function(b){b.addEventListener('click',function(){CAM.node=b.getAttribute('data-cnode');document.querySelectorAll('.seg [data-cnode]').forEach(function(x){x.classList.toggle('on',x===b)});var live=document.getElementById('camframe').classList.contains('show');if(live){try{document.getElementById('camframe').contentWindow.postMessage({cmd:'facing',facing:(CAM.node==='front'?'user':'environment')},'*');}catch(e){}}else{post('/api/cam/lens',{name:DEV,lens:CAM.node,launch:false}).catch(function(){});}toast((CAM.node==='front'?'前置':'后置')+'摄像头');toast((CAM.node==='front'?'前置':'后置')+'摄像头 · '+camNode());});});
 document.getElementById('camidle').addEventListener('click',function(){post('/api/cam/stop',{name:DEV}).then(function(){toast('已恢复空闲画面');camStatus(document.getElementById('imgstat'),'已恢复空闲');setTimeout(cfgPoll,600);});});
 document.getElementById('camimg').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'image');});
 document.getElementById('camvideo').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'video');});
@@ -4534,7 +4542,17 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
     # 不切的话点“前置”看到的还是上次那个镜头的画面（后置）。
     _want = 1 if cam_node_is_front(node) else 0
     _switched = False
-    if CAM_LENS.get(name) != _want:
+    # 缓存可能为空（dashboard 刚重启过），先读一次真实偏好文件，否则每次注入都会
+    # 误判“镜头不对”而 force-stop 一次相机 App（等于每次注入都重启 App）。
+    _cur = CAM_LENS.get(name)
+    if _cur is None:
+        try:
+            _cur = cam_current_lens(name)
+        except Exception:  # noqa: BLE001
+            _cur = None
+    if _cur is not None:
+        CAM_LENS[name] = _cur
+    if _cur != _want:
         try:
             cam_lens_set(name, "front" if _want else "back", launch=False)
             _switched = True
