@@ -3541,6 +3541,19 @@ html,body{margin:0;width:100%;height:100%;height:100dvh;overflow:hidden;backgrou
 #kbar button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
 .sheet{position:absolute;left:0;right:0;bottom:0;z-index:40;display:none;flex-direction:column;padding:14px 14px calc(14px + env(safe-area-inset-bottom));background:#0c151e;border-top:1px solid #24384a;border-radius:18px 18px 0 0;box-shadow:0 -18px 50px rgba(0,0,0,.6);max-height:82dvh}
 .sheet.show{display:flex}
+/* 关掉弹窗不能把正在跑的东西停掉：display:none 会让浏览器把 iframe 里的定时器节流到
+   1Hz（传感器同步掉帧）甚至断掉 WebRTC 推流。所以“关闭”只是把面板挪到屏幕外。 */
+.sheet.park{display:flex;left:-200vw;right:auto;width:min(560px,96vw);pointer-events:none}
+#dock .db{position:relative}
+#dock .db i.bdg{position:absolute;top:3px;right:5px;font-style:normal;font-size:9px;line-height:1;padding:2px 4px;border-radius:6px;background:#3d7be0;color:#fff;display:none}
+#dock .db i.bdg.on{display:block}
+#dock .db i.bdg.warn{background:#c4553d}
+#dock .db i.bdg.good{background:#1f9d68}
+#cfgbar{position:absolute;left:8px;right:8px;bottom:calc(var(--dock-h) + 6px + env(safe-area-inset-bottom));z-index:29;display:flex;gap:6px;flex-wrap:wrap;pointer-events:none}
+#cfgbar .ci{display:flex;align-items:center;gap:4px;padding:4px 9px;border-radius:999px;background:rgba(8,16,24,.88);border:1px solid rgba(120,170,230,.26);font-size:11px;color:#9fb6cb}
+#cfgbar .ci b{font-weight:700;color:#e8f3ff}
+#cfgbar .ci.live{border-color:rgba(70,210,150,.55);color:#8fe8bf}
+#cfgbar .ci.live b{color:#b7ffe0}
 .sh{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
 .sh b{font-size:16px}
 .sh button{width:34px;height:34px;border-radius:10px;border:1px solid #2a3d50;background:#152331;color:#dce9f6;font-size:18px}
@@ -3597,10 +3610,11 @@ html,body{margin:0;width:100%;height:100%;height:100dvh;overflow:hidden;backgrou
 <div class="db" data-key="3"><span>⌂</span><em>主页</em></div>
 <div class="db" data-key="187"><span>▣</span><em>任务</em></div>
 <div class="db" id="kbtn"><span>⌨</span><em>键盘</em></div>
-<div class="db" id="cambtn"><span>◉</span><em>相机</em></div>
-<div class="db" id="locbtn"><span>◎</span><em>定位</em></div>
-<div class="db" id="sensebtn"><span>⌁</span><em>传感器</em></div>
+<div class="db" id="cambtn"><span>◉</span><em>相机</em><i class="bdg" id="camBdg"></i></div>
+<div class="db" id="locbtn"><span>◎</span><em>定位</em><i class="bdg" id="locBdg"></i></div>
+<div class="db" id="sensebtn"><span>⌁</span><em>传感器</em><i class="bdg" id="senBdg"></i></div>
 </div>
+<div id="cfgbar"></div>
 <div id="camsheet" class="sheet"><div class="sh"><b>相机注入</b><button id="camclose">×</button></div>
 <div class="camtab"><button data-tab="live" class="on">手机实时</button><button data-tab="image">图片</button><button data-tab="video">视频</button></div>
 <div class="campane on" id="pane-live"><p>把这部手机的摄像头画面实时注入云手机。首次使用请允许摄像头权限；自签证书需要先点“继续”。</p><div class="row" id="camrow"><button class="primary" id="camstart">打开摄像头</button><a id="camlink" href="#" target="_blank" rel="noopener">新页面</a></div><iframe id="camframe" allow="camera; microphone; autoplay; fullscreen"></iframe></div>
@@ -3672,27 +3686,69 @@ kinp.addEventListener('input',function(e){if(e.isComposing)return;clearTimeout(k
 kinp.addEventListener('compositionend',function(){clearTimeout(kt);kt=setTimeout(kbFlush,120)});
 kinp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();clearTimeout(kt);kbFlush().then(function(){setTimeout(function(){sendKey(66)},140)})}else if(e.key==='Backspace'&&!kinp.value){e.preventDefault();sendKey(67)}});
 document.addEventListener('keydown',function(e){var t=e.target;if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;if(e.ctrlKey||e.altKey||e.metaKey)return;if(e.key==='Enter'){sendKey(66);return}if(e.key==='Backspace'){sendKey(67);return}if(e.key.length===1){kbuf+=e.key;clearTimeout(kt);kt=setTimeout(function(){var v=kbuf;kbuf='';if(v)post('/api/text',{name:DEV,text:v})},220)}});
-function openSheet(id){document.querySelectorAll('.sheet').forEach(function(s){s.classList.remove('show')});document.getElementById(id).classList.add('show')}
+function openSheet(id){
+  document.querySelectorAll('.sheet').forEach(function(s){
+    if(s.id===id)return;
+    // 带 iframe 的面板（相机/传感器）关掉时改停到屏幕外，否则 display:none 会把
+    // 里面的推流与传感器定时器节流/掐断。
+    if(s.classList.contains('show')&&(s.id==='camsheet'||s.id==='sensesheet')){s.classList.remove('show');s.classList.add('park');return;}
+    s.classList.remove('show');
+  });
+  var t=document.getElementById(id);if(t){t.classList.remove('park');t.classList.add('show');}
+}
 function closeSheets(){document.querySelectorAll('.sheet').forEach(function(s){s.classList.remove('show')})}
-var CAM={node:'back',busy:false};
+var CAM={node:'back',busy:false,url:''};
+var SEN={url:''};
 function camNode(){return camNodeFor(DEV,CAM.node);}
 function camNodeFor(dev,which){var n=parseInt(String(dev).replace(/[^0-9]/g,''),10)||1;var base=20+2*(n-1);return '/dev/video'+(which==='front'?base+1:base);}
 function camStatus(el,msg,cls){if(!el)return;el.textContent=msg;el.className='camstat'+(cls?' '+cls:'');}
 function camSheetTab(name){document.querySelectorAll('.camtab button').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-tab')===name)});['live','image','video'].forEach(function(k){document.getElementById('pane-'+k).classList.toggle('on',k===name)});}
-function camOpen(){var f=document.getElementById('camframe');var u='/cam?device='+encodeURIComponent(DEV)+'&node='+encodeURIComponent(camNode())+'&auto=1'+(K?'&k='+encodeURIComponent(K):'')+(new URLSearchParams(location.search).get('test')==='1'?'&test=1':'')+(new URLSearchParams(location.search).get('jpeg')==='1'?'&jpeg=1':'');f.src=u;f.classList.add('show');document.getElementById('camlink').href=u;}
-function camHide(){var f=document.getElementById('camframe');f.classList.remove('show');f.src='about:blank';document.getElementById('camsheet').classList.remove('mini');closeSheets();}
+function camUrl(){return '/cam?device='+encodeURIComponent(DEV)+'&node='+encodeURIComponent(camNode())+'&auto=1'+(K?'&k='+encodeURIComponent(K):'')+(new URLSearchParams(location.search).get('test')==='1'?'&test=1':'')+(new URLSearchParams(location.search).get('jpeg')==='1'?'&jpeg=1':'');}
+function camOpen(){var f=document.getElementById('camframe');var u=camUrl();if(CAM.url!==u){f.src=u;CAM.url=u;}f.classList.add('show');document.getElementById('camlink').href=u;var s=document.getElementById('camsheet');s.classList.remove('park');openSheet('camsheet');cfgPoll();}
+/* 只收起面板，不销毁 iframe：手机摄像头的 WHIP 推流、传感器同步都活在 iframe 里，
+   src 一清就全停了。要真的停，用面板里的「恢复空闲」。 */
+function camHide(){var s=document.getElementById('camsheet');s.classList.remove('show','mini');s.classList.add('park');closeSheets();}
 function camUpload(file,kind){var el=document.getElementById(kind==='image'?'imgstat':'vidstat');return new Promise(function(res,rej){var x=new XMLHttpRequest();x.open('POST','/api/cam/file');x.setRequestHeader('X-Filename',encodeURIComponent(file.name));x.upload.onprogress=function(e){if(e.lengthComputable)camStatus(el,'上传中 '+Math.round(e.loaded/e.total*100)+'%');};x.onload=function(){var j={};try{j=JSON.parse(x.responseText)}catch(e){}if(j&&j.path)res(j);else rej(new Error((j&&j.error)||'上传失败'));};x.onerror=function(){rej(new Error('网络错误'));};x.send(file);});}
-function camInjectFile(file,kind){if(!file)return;if(CAM.busy){toast('上一个注入还在进行中');return;}CAM.busy=true;var el=document.getElementById(kind==='image'?'imgstat':'vidstat');camStatus(el,file.name+' · 准备上传…');camUpload(file,kind).then(function(j){camStatus(el,'已上传，正在切源…');return post('/api/cam/start',{name:DEV,node:camNode(),path:j.path,kind:kind});}).then(function(j){if(j&&(j.ok||j.queued)){camStatus(el,'已注入 '+(kind==='image'?'图片':'视频')+'，云手机相机已切源',true);toast('已切换注入源');}else{camStatus(el,'注入失败：'+((j&&j.error)||'未知错误'),false);}}).catch(function(e){camStatus(el,'失败：'+(e&&e.message?e.message:e),false);}).then(function(){CAM.busy=false;});}
+function camInjectFile(file,kind){if(!file)return;if(CAM.busy){toast('上一个注入还在进行中');return;}CAM.busy=true;var el=document.getElementById(kind==='image'?'imgstat':'vidstat');camStatus(el,file.name+' · 准备上传…');camUpload(file,kind).then(function(j){camStatus(el,'已上传，正在切源…');return post('/api/cam/start',{name:DEV,node:camNode(),path:j.path,kind:kind});}).then(function(j){if(j&&(j.ok||j.queued)){camStatus(el,'已注入 '+(kind==='image'?'图片':'视频')+'，云手机相机已切源',true);toast('已切换注入源');}else{camStatus(el,'注入失败：'+((j&&j.error)||'未知错误'),false);}}).catch(function(e){camStatus(el,'失败：'+(e&&e.message?e.message:e),false);}).then(function(){CAM.busy=false;setTimeout(cfgPoll,600);});}
 document.querySelectorAll('.camtab button').forEach(function(b){b.addEventListener('click',function(){camSheetTab(b.getAttribute('data-tab'))});});
 document.querySelectorAll('.seg [data-cnode]').forEach(function(b){b.addEventListener('click',function(){CAM.node=b.getAttribute('data-cnode');document.querySelectorAll('.seg [data-cnode]').forEach(function(x){x.classList.toggle('on',x===b)});if(document.getElementById('camframe').classList.contains('show'))camOpen();toast((CAM.node==='front'?'前置':'后置')+'摄像头 · '+camNode());});});
-document.getElementById('camidle').addEventListener('click',function(){post('/api/cam/stop',{name:DEV}).then(function(){toast('已恢复空闲画面');camStatus(document.getElementById('imgstat'),'已恢复空闲');});});
+document.getElementById('camidle').addEventListener('click',function(){post('/api/cam/stop',{name:DEV}).then(function(){toast('已恢复空闲画面');camStatus(document.getElementById('imgstat'),'已恢复空闲');setTimeout(cfgPoll,600);});});
 document.getElementById('camimg').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'image');});
 document.getElementById('camvideo').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'video');});
 document.getElementById('cambtn').addEventListener('click',function(){openSheet('camsheet');camSheetTab('live');});
-function senseOpen(){var f=document.getElementById('senseframe');var qs=new URLSearchParams(location.search);f.src='/ms?device='+encodeURIComponent(DEV)+'&auto=1'+(K?'&k='+encodeURIComponent(K):'')+(qs.get('test')==='1'?'&test=1':'');openSheet('sensesheet');}
+
+/* ── 已配置项外显：贴条 + 按钮角标 ─────────────────────────────────────── */
+var CFG={cam:null,loc:null,sen:null,senAge:99};
+var CINKIND={image:'图片',video:'视频',stream:'直播',jpeg:'图片',rtc:'直播'};
+function cfgBadge(id,text,cls){
+  var e=document.getElementById(id);if(!e)return;
+  if(!text){e.className='bdg';e.textContent='';return;}
+  e.className='bdg '+(cls||'on');e.textContent=text;
+}
+function cfgChip(k,v,live){return '<div class="ci'+(live?' live':'')+'">'+k+' <b>'+v+'</b></div>';}
+function cfgRender(){
+  var bar=document.getElementById('cfgbar');if(!bar)return;
+  var st=CFG.cam||{}, kind=st.kind||'', streaming=(st.state==='streaming');
+  var camTxt=streaming&&CINKIND[kind]?CINKIND[kind]:(st.state==='error'?'异常':'空闲');
+  cfgBadge('camBdg',streaming&&CINKIND[kind]?CINKIND[kind]:'',streaming?'good':'on');
+  var loc=CFG.loc||{},locTxt=loc.ok&&loc.manual?(loc.source==='phone-gps'?'手机定位':'手动定位'):'板子默认';
+  cfgBadge('locBdg',loc.ok&&loc.manual?(loc.source==='phone-gps'?'手机':'手动'):'',loc.ok&&loc.manual?'good':'on');
+  var sen=CFG.sen||{},n=(sen.on||[]).length,senLive=sen.ok&&n>0&&CFG.senAge<3;
+  var senTxt=n?(senLive?'同步 '+n+'/10':'已断开 '+n+'/10'):'未开启';
+  cfgBadge('senBdg',n?(n+'/10'):'',senLive?'good':(n?'warn':'on'));
+  bar.innerHTML=cfgChip('相机',camTxt,streaming)+cfgChip('定位',locTxt,loc.ok&&loc.manual)+cfgChip('传感器',senTxt,senLive);
+}
+function cfgPoll(){
+  var j1=fetch('/api/cam/status?name='+encodeURIComponent(DEV),{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){CFG.cam=(j&&j.state)||null;}).catch(function(){});
+  var j2=fetch('/api/location?name='+encodeURIComponent(DEV),{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){CFG.loc=j||null;}).catch(function(){});
+  var j3=fetch('/api/sensors/live?name='+encodeURIComponent(DEV),{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){CFG.sen=j||null;CFG.senAge=(j&&typeof j.age==='number')?j.age:99;}).catch(function(){});
+  Promise.all([j1,j2,j3]).then(cfgRender).catch(function(){});
+}
+cfgPoll();setInterval(cfgPoll,4000);
+function senseOpen(){var f=document.getElementById('senseframe');var qs=new URLSearchParams(location.search);if(!SEN.url){SEN.url='/ms?device='+encodeURIComponent(DEV)+'&auto=1'+(K?'&k='+encodeURIComponent(K):'')+(qs.get('test')==='1'?'&test=1':'');f.src=SEN.url;}var s=document.getElementById('sensesheet');s.classList.remove('park');openSheet('sensesheet');cfgPoll();}
 document.getElementById('sensebtn').addEventListener('click',senseOpen);
-document.getElementById('senseclose').addEventListener('click',function(){var f=document.getElementById('senseframe');f.src='about:blank';closeSheets();});
-document.getElementById('camclose').addEventListener('click',function(){camHide();post('/api/cam/stop',{name:DEV,node:camNode()});});
+document.getElementById('senseclose').addEventListener('click',function(){var s=document.getElementById('sensesheet');s.classList.remove('show');s.classList.add('park');closeSheets();});
+document.getElementById('camclose').addEventListener('click',camHide);
 document.getElementById('camstart').addEventListener('click',camOpen);
 function locBadge(){
   var b=document.getElementById('locbadge');
@@ -3716,6 +3772,7 @@ function locApply(lat,lon,alt,quiet,source){
       LOC.manual=true;LOC.source=source||'manual';LOC.ts=Math.round(Date.now()/1000);locBadge();
       document.getElementById('loclog').textContent='已应用（人为设定）：'+j.lat+', '+j.lon+' · '+j.alt+'m';
       if(!quiet)toast('定位已切换（已标记人为设定）');
+      setTimeout(cfgPoll,600);
       return true;
     }
     document.getElementById('loclog').textContent=(j&&j.error)||'应用失败';return false;
