@@ -58,4 +58,9 @@ pull /vendor/etc/g98_sensors_trace.bin.gz
 # stock file caps at 1280x720, so a 1280x960 node yields an empty size list and
 # cameraserver fails with "generated preview size list is empty!!" (-22 / -19).
 pull /vendor/etc/media_profiles_V1_0.xml
+# WeChat face verification records NV12 through OMX.google.h264.encoder. The stock
+# 32-bit SoftAVCEnc fails inside its first ive_api_function call for NV12, leaving a
+# 262-byte fdv_*.mp4, so WeChat reports a local "Network error" without uploading.
+# The patched library converts byte-buffer NV12 to I420 before calling libavc.
+pull /vendor/lib/libstagefright_soft_avcenc.so
 echo "done: $(ls -1 "$D" | wc -l) artifacts"

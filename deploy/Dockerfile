@@ -24,6 +24,8 @@ COPY artifacts/vintf-manifest.xml /vendor/etc/vintf/manifest.xml
 #     legacy camera API1 (WeChat face verification) can build its size lists
 #     for the 1280x960 v4l2 nodes (stock caps at 1280x720 -> empty list -> -22)
 COPY artifacts/media_profiles_V1_0.xml /vendor/etc/media_profiles_V1_0.xml
+# --- soft AVC encoder: convert byte-buffer NV12 to I420 (WeChat face video) ---
+COPY artifacts/libstagefright_soft_avcenc.so /vendor/lib/libstagefright_soft_avcenc.so
 # --- camera provider init overrides (per-instance nodes injected at boot)
 COPY artifacts/android.hardware.camera.provider@2.4-service.rc /vendor/etc/init/android.hardware.camera.provider@2.4-service.rc
 COPY artifacts/android.hardware.camera.provider@2.7-external-service.rc /vendor/etc/init/android.hardware.camera.provider@2.7-external-service.rc

@@ -80,6 +80,18 @@ ensure_media_profiles() {
   docker exec "$C" chmod 644 /vendor/etc/media_profiles_V1_0.xml >/dev/null 2>&1 || true
 }
 
+ensure_soft_avcenc() {
+  # 微信人脸用 NV12 喂 OMX.google.h264.encoder；原厂 SoftAVCEnc 在 NV12 下第一次
+  # ive_api_function 就失败，fdv_*.mp4 只有 262B，微信在本地判 Network error（不上传）。
+  # 补丁版仅在 bytebuffer NV12 时先转 I420；I420 与 surface/meta 输入路径不变。
+  # ctl.restart media.codec 在 redroid 上会被拒绝，只能 kill 后由 init 拉起。
+  local A=/root/artifacts
+  [ -f "$A/libstagefright_soft_avcenc.so" ] || return 0
+  docker cp "$A/libstagefright_soft_avcenc.so" "$C:/vendor/lib/libstagefright_soft_avcenc.so" >/dev/null 2>&1 || true
+  docker exec "$C" chmod 644 /vendor/lib/libstagefright_soft_avcenc.so >/dev/null 2>&1 || true
+  docker exec "$C" sh -c 'kill $(pidof media.codec) 2>/dev/null' >/dev/null 2>&1 || true
+}
+
 configure_camera() {
   # 每台云手机独占一对 v4l2loopback 节点：wx1=video20/21，wx2=22/23 … wx6=30/31。
   # 以前 5 台容器共用 video10/11，任何一台开相机都会和别人抢同一条 v4l2 队列。
@@ -201,6 +213,7 @@ docker exec "$C" am force-stop com.android.camera2 >/dev/null 2>&1 || true
 ensure_adbkeyboard
 ensure_sensors
 ensure_media_profiles
+ensure_soft_avcenc
 configure_camera
 start_touch
 sleep 2

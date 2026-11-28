@@ -29,6 +29,9 @@ python3 verify_sensors.py || FAIL=1
 say "legacy camera API1 size lists (media_profiles VideoEncoderCap vs 1280x960 nodes)"
 python3 verify_api1_sizes.py || FAIL=1
 
+say "soft AVC encoder accepts NV12 byte buffers (WeChat face video)"
+python3 verify_nv12_encoder.py wx1 || FAIL=1
+
 say "phone sensor sync (ws -> live file -> HAL)"
 python3 verify_sensor_sync.py wx1 || FAIL=1
 
