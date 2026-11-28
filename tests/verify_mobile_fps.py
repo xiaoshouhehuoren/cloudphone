@@ -18,7 +18,9 @@ def main():
         'both camera openings constrained': page.count('getUserMedia(cameraConstraints())') == 2,
         'WebRTC sender max 30': 'maxFramerate=CAPTURE_FPS' in page,
         'sender bitrate bounded': 'maxBitrate=2500000' in page,
-        'actual sender fps visible': "sendFps+' fps'" in page,
+        'actual sender fps visible': "sendFps.toFixed(1)+' fps" in page,
+        'real track settings visible': 't.getSettings?t.getSettings():{}' in page,
+        'quality limitation visible': 'qualityLimitationReason' in page,
     }
     failed = False
     for name, ok in checks.items():

@@ -459,18 +459,33 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   // it's driver dependent. For now, assume freeform, and
   // some cameras may just behave badly.
   // TODO(b/29579652): Figure out a way to determine this.
-  // Real phones advertise digital zoom; the crop region is a no-op here, but
-  // reporting 1.0 makes legacy clients disable zoom entirely.
+  // Crop requests are accepted for API compatibility but do not actually move
+  // the capture window. Keep the legacy maxZoom=8 for now: setting exactly 1.0
+  // was A/B-tested on wx5 and makes Android 13 API1 deliver no preview callback
+  // (camera 0 RESULT disappears), although Camera2 requests still complete.
+  // Real sensor dimensions below are safe; digital zoom remains a known gap.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<float>(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM, 8.0f)));
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<uint8_t>(ANDROID_SCALER_CROPPING_TYPE,
                             ANDROID_SCALER_CROPPING_TYPE_FREEFORM)));
-  // Spoof pixel array size for now, eventually get from CROPCAP.
-  // K50: 48MP back (8000x6000), 20MP front (5184x3888) - 4:3 like the node.
-  std::array<int32_t, 2> pixel_array_size =
-      k50_back ? std::array<int32_t, 2>{{8000, 6000}}
-               : std::array<int32_t, 2>{{5184, 3888}};
+  // Report the actual V4L2 raster, not the K50's 48MP/20MP sensor. The K50 is
+  // an application-level reference profile only; claiming tens of megapixels
+  // while exposing only 1280x960/640x480 streams makes Camera2 self-contradictory.
+  // keep_format=1 pins the loopback to its largest YU12 size and the HAL scales
+  // smaller requests on dequeue, so that largest size is the real pixel array.
+  std::array<int32_t, 2> pixel_array_size{{1280, 960}};
+  std::set<std::array<int32_t, 2>> sensor_sizes;
+  if (device->GetFormatFrameSizes(V4L2_PIX_FMT_YUV420, &sensor_sizes) == 0) {
+    for (const auto& size : sensor_sizes) {
+      if (size[0] > 0 && size[1] > 0 &&
+          size[0] * size[1] > pixel_array_size[0] * pixel_array_size[1]) {
+        pixel_array_size = size;
+      }
+    }
+  } else {
+    HAL_LOGW("Cannot query YU12 sizes; using the deployed 1280x960 raster");
+  }
   components.insert(std::unique_ptr<PartialMetadataInterface>(
       new Property<std::array<int32_t, 2>>(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
                                            pixel_array_size)));
@@ -511,9 +526,13 @@ int GetV4L2Metadata(std::shared_ptr<V4L2Wrapper> device, int id,
   // rows over most of the frame interval, so report ~2/3 of it instead of 0.
   components.insert(FixedState<int64_t>(
       ANDROID_SENSOR_ROLLING_SHUTTER_SKEW, k50_back ? 22000000 : 18000000));
-  // No way to actually get orientation from V4L2.
+  // Real phone sensors are mounted sideways: the raw frame is landscape and
+  // apps/SDK rotate it by this value. Reporting 0 told WeChat's YouTu SDK (see
+  // YtCameraSetting.getVideoRotate) that the 640x480 NV21 frames need no
+  // rotation, so an upright face arrived lying on its side and liveness never
+  // left the "looking for a face" state. K50: 90 on both cameras.
   components.insert(std::unique_ptr<PartialMetadataInterface>(
-      new Property<int32_t>(ANDROID_SENSOR_ORIENTATION, 0)));
+      new Property<int32_t>(ANDROID_SENSOR_ORIENTATION, 90)));
   // TODO(b/31023611): Sensor frame duration. Range should
   // be dependent on the stream configuration being used.
   // No test patterns supported.

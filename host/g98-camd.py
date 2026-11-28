@@ -399,7 +399,8 @@ def source_cmd(kind, arg, geo, fps=None):
         # Low-latency pull: the phone encoder and mediamtx already add delay, so
         # do not let ffmpeg's demuxer/decoder add its own analysis + reorder
         # buffering on top (that alone was worth ~1s of lag behind the phone).
-        return [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error",
+        return [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "info",
+                "-nostats", "-progress", "pipe:2",
                 "-fflags", "nobuffer", "-flags", "low_delay",
                 "-analyzeduration", "0", "-probesize", "32",
                 "-max_delay", "0", "-reorder_queue_size", "0",
@@ -436,6 +437,59 @@ class Reader(threading.Thread):
         # stuck if it is started against an empty pipe, so we spawn it lazily
         # once the first frame is actually here.
         self.pending = collections.deque(maxlen=6)
+        # ffmpeg progress is metadata only; decoded rawvideo still uses stdout.
+        # It exposes the negotiated input raster and output PTS without adding a
+        # second RTSP consumer (which previously perturbed the very stream we
+        # were trying to measure).
+        self.telemetry_lock = threading.Lock()
+        self.telemetry = {"codec": None, "input_w": 0, "input_h": 0,
+                          "progress_frame": 0, "progress_out_time_us": 0,
+                          "progress_at": 0.0, "progress_updates": 0,
+                          "dup_frames": 0, "drop_frames": 0}
+        self.stderr_thread = None
+
+    def _stderr_loop(self, proc):
+        current = {}
+        input_seen = False
+        try:
+            for raw in iter(proc.stderr.readline, b""):
+                line = raw.decode("utf-8", "replace").strip()
+                if not input_seen and "Video:" in line:
+                    m = re.search(r"Video:\s*([^,]+).*?\b(\d{2,5})x(\d{2,5})\b", line)
+                    if m:
+                        with self.telemetry_lock:
+                            self.telemetry["codec"] = m.group(1).strip()
+                            self.telemetry["input_w"] = int(m.group(2))
+                            self.telemetry["input_h"] = int(m.group(3))
+                        input_seen = True
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                current[key] = value
+                if key != "progress":
+                    continue
+                now = time.time()
+                with self.telemetry_lock:
+                    for src, dst in (("frame", "progress_frame"),
+                                     ("out_time_us", "progress_out_time_us"),
+                                     ("dup_frames", "dup_frames"),
+                                     ("drop_frames", "drop_frames")):
+                        try:
+                            self.telemetry[dst] = int(current.get(src, "0"))
+                        except ValueError:
+                            pass
+                    self.telemetry["progress_at"] = now
+                    self.telemetry["progress_updates"] += 1
+                current = {}
+        except (OSError, ValueError):
+            pass
+
+    def telemetry_snapshot(self):
+        with self.telemetry_lock:
+            out = dict(self.telemetry)
+        out["progress_age"] = (round(time.time() - out["progress_at"], 2)
+                               if out["progress_at"] else None)
+        return out
 
     def feed(self, data):
         """Push one encoded JPEG into the decoder; drops frames instead of blocking."""
@@ -507,7 +561,12 @@ class Reader(threading.Thread):
             errsink = open("/tmp/camd-jpeg.err", "ab") if self.kind == "jpeg" else subprocess.DEVNULL
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE,
-                                         stderr=errsink, bufsize=0)
+                                         stderr=(subprocess.PIPE if self.kind == "rtsp" else errsink),
+                                         bufsize=0)
+            if self.kind == "rtsp":
+                self.stderr_thread = threading.Thread(
+                    target=self._stderr_loop, args=(self.proc,), daemon=True)
+                self.stderr_thread.start()
         except Exception as exc:  # noqa: BLE001
             print("camd: spawn failed %s: %s" % (self.kind, exc), flush=True)
             return
@@ -580,8 +639,13 @@ class Reader(threading.Thread):
         try:
             if self.proc.stdout is not None:
                 self.proc.stdout.close()
+            if self.proc.stderr is not None:
+                self.proc.stderr.close()
         except OSError:
             pass
+        if self.stderr_thread is not None:
+            self.stderr_thread.join(timeout=1)
+            self.stderr_thread = None
 
 
 class JpegDecoder(threading.Thread):
@@ -858,6 +922,8 @@ class NodeRouter:
 
     def snapshot(self):
         with self.lock:
+            obj = self.decoder or self.reader
+            telemetry = obj.telemetry_snapshot() if isinstance(obj, Reader) else {}
             return {
                 "node": self.node,
                 "kind": self.kind,
@@ -876,6 +942,7 @@ class NodeRouter:
                 "retry_delay": getattr(self.decoder or self.reader, "retry_delay", 0.0),
                 "source_dropped": (self.decoder or self.reader).dropped
                                   if (self.decoder or self.reader) else 0,
+                "source_telemetry": telemetry,
                 # 源静默时写线程重复最后一帧，written 继续增长而 source_frames 不动。
                 "holding": self.holding,
                 "last_frame_age": (round(time.time() - self.last_frame_ts, 2)

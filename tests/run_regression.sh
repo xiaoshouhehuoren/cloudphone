@@ -23,6 +23,15 @@ say "dashboard material library API"
 say "mobile web publisher caps capture and WHIP sending at 30 fps"
 python3 verify_mobile_fps.py || FAIL=1
 
+say "mobile /cam sensor sync and protocol compatibility"
+python3 verify_cam_sensor_page.py || FAIL=1
+
+say "WeChat face video capture watcher and forensic analyzer selftest"
+python3 facecap_selftest.py || FAIL=1
+
+say "device profile guardrails, excluded-hardware XML, and regional settings"
+python3 verify_device_coherence.py --check-pm wx5 || FAIL=1
+
 say "camera providers (legacy running, external crash loop disabled)"
 python3 verify_camera_providers.py || FAIL=1
 
@@ -31,6 +40,9 @@ python3 verify_sensors.py || FAIL=1
 
 say "legacy camera API1 size lists (media_profiles VideoEncoderCap vs 1280x960 nodes)"
 python3 verify_api1_sizes.py || FAIL=1
+
+say "camera static metadata matches real V4L2 node geometry"
+python3 verify_camera_metadata.py || FAIL=1
 
 say "soft AVC encoder accepts NV12 byte buffers (WeChat face video)"
 python3 verify_nv12_encoder.py wx1 || FAIL=1
@@ -49,6 +61,9 @@ python3 verify_orient_default.py || FAIL=1
 
 say "live phone injection is clean (no synthetic grain/AE/fps resampling)"
 python3 verify_live_clean.py /root/g98-camd.py || FAIL=1
+
+say "live decoded-frame/PTS/input-resolution telemetry (synthetic VP8, wx5)"
+python3 verify_live_telemetry.py || FAIL=1
 
 say "camd holds last frame when the rtsp source is silent"
 python3 verify_hold.py || FAIL=1

@@ -18,6 +18,13 @@ if "-fps_mode" not in cmd or cmd[cmd.index("-fps_mode") + 1] != "passthrough":
 if "-nostdin" not in cmd:
     print("[FAIL] live ffmpeg must not consume the caller script stdin")
     fails += 1
+for required in ("-progress", "-nostats"):
+    if required not in cmd:
+        print("[FAIL] live ffmpeg lost progress telemetry:", required)
+        fails += 1
+if "-progress" in cmd and cmd[cmd.index("-progress") + 1] != "pipe:2":
+    print("[FAIL] progress telemetry must use the drained stderr pipe")
+    fails += 1
 for forbidden in ("noise=", "eq=brightness", "fps="):
     if m.LIVE_CLEAN and forbidden in vf:
         print("[FAIL] live filter contains", forbidden)

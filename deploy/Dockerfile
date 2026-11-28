@@ -26,6 +26,8 @@ COPY artifacts/vintf-manifest.xml /vendor/etc/vintf/manifest.xml
 COPY artifacts/media_profiles_V1_0.xml /vendor/etc/media_profiles_V1_0.xml
 # --- soft AVC encoder: convert byte-buffer NV12 to I420 (WeChat face video) ---
 COPY artifacts/libstagefright_soft_avcenc.so /vendor/lib/libstagefright_soft_avcenc.so
+# --- hardware feature exclusions: stop claiming flash/AF/external-cam/network-loc ---
+COPY g98-excluded-hardware.xml /system/etc/permissions/g98-excluded-hardware.xml
 # --- camera provider init overrides (per-instance nodes injected at boot)
 COPY artifacts/android.hardware.camera.provider@2.4-service.rc /vendor/etc/init/android.hardware.camera.provider@2.4-service.rc
 COPY artifacts/android.hardware.camera.provider@2.7-external-service.rc /vendor/etc/init/android.hardware.camera.provider@2.7-external-service.rc

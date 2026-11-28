@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Exclude PackageManager hardware features that this cloud-phone stack does not provide.
+     Keeps android.hardware.camera / camera.any / camera.front and android.hardware.location.
+     Does not fabricate telephony, NFC, or hardware attestation features. -->
+<permissions>
+    <unavailable-feature name="android.hardware.camera.flash" />
+    <unavailable-feature name="android.hardware.camera.external" />
+    <unavailable-feature name="android.hardware.camera.autofocus" />
+    <unavailable-feature name="android.hardware.location.network" />
+</permissions>

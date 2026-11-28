@@ -4,12 +4,39 @@ N=${1:?usage: wx-start.sh <1-6>}
 C=wx$N
 CONF=/srv/redroid/wx-identities.conf
 IMG=g98/redroid-panthor-rt:13-fuxi-v3
+# Application-facing product profile only. Keep the existing base image, display
+# settings and mt6983 HAL ABI selector unchanged for both profiles.
+PROFILE=${G98_DEVICE_PROFILE:-fuxi}
+W=1080; H=2400; DPI=440; FPS=30
+MANUFACTURER=Xiaomi
+case "$PROFILE" in
+  fuxi)
+    MODEL=2211133C; DEVICE=fuxi; NAME=fuxi; FLAVOR=fuxi-user
+    BRAND=Xiaomi
+    FP=Xiaomi/fuxi/fuxi:13/TKQ1.221114.001/V14.0.9.0.TMCCNXM:user/release-keys
+    ;;
+  k50)
+    MODEL=22041211AC; DEVICE=rubens; NAME=rubens; FLAVOR=rubens-user
+    BRAND=Redmi
+    # The supplied dump identifies mihal, while the requested device profile is
+    # rubens. Never invent a fingerprint or mix fragments from different dumps.
+    FP=${G98_K50_FINGERPRINT:-}
+    if [ -z "$FP" ]; then
+      echo "G98_DEVICE_PROFILE=k50 requires G98_K50_FINGERPRINT copied verbatim from an official stock build.prop; refusing to guess rubens/mihal" >&2
+      exit 1
+    fi
+    if [[ ! "$FP" =~ ^[^/[:space:]]+/[^/[:space:]]+/[^[:space:]]+:13/[^/[:space:]]+/[^[:space:]]+:user/release-keys$ ]]; then
+      echo "invalid G98_K50_FINGERPRINT: expected brand/device/product:13/build-id/incremental:user/release-keys" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "unsupported G98_DEVICE_PROFILE=$PROFILE (expected fuxi or k50)" >&2
+    exit 1
+    ;;
+esac
 read -r S M P A < <(awk -v c="$C" '$1==c {print $2, $3, $4, $5}' "$CONF")
 [ -n "${S:-}" ] && [ -n "${A:-}" ] || { echo "no identity for $C" >&2; exit 1; }
-# Common profile: Xiaomi 13/fuxi + 1080x2400/440dpi/30fps.
-W=1080; H=2400; DPI=440; FPS=30
-MODEL=2211133C; DEVICE=fuxi; NAME=fuxi; FLAVOR=fuxi-user
-FP=Xiaomi/fuxi/fuxi:13/TKQ1.221114.001/V14.0.9.0.TMCCNXM:user/release-keys
 create() {
   mkdir -p "/srv/redroid/$C"
   # 内存上限：软线由 g98-memlimit.timer 每 5 分钟写 memory.high=2G；
@@ -19,10 +46,44 @@ create() {
     androidboot.redroid_width="$W" androidboot.redroid_height="$H" androidboot.redroid_dpi="$DPI" androidboot.redroid_fps="$FPS" \
     androidboot.verifiedbootstate=green androidboot.flash.locked=1 androidboot.veritymode=enforcing androidboot.selinux=enforcing \
     ro.hardware.gralloc=g98 ro.hw_timeout_multiplier=10 \
-    ro.product.model="$MODEL" ro.product.brand=Xiaomi ro.product.manufacturer=Xiaomi ro.product.device="$DEVICE" ro.product.name="$NAME" \
+    ro.product.model="$MODEL" ro.product.brand="$BRAND" ro.product.manufacturer="$MANUFACTURER" ro.product.device="$DEVICE" ro.product.name="$NAME" \
     ro.build.flavor="$FLAVOR" ro.build.product="$DEVICE" ro.build.type=user ro.build.tags=release-keys \
     ro.serialno="$S" ro.boot.serialno="$S" ro.build.fingerprint="$FP" >/dev/null
 }
+ensure_excluded_hardware() {
+  local XML=/root/artifacts/g98-excluded-hardware.xml
+  local DST=/system/etc/permissions/g98-excluded-hardware.xml
+  [ -f "$XML" ] || { echo "$C: missing $XML" >&2; return 1; }
+  # PackageManager reads feature XML during boot. If this instance was already
+  # booted, the next normal boot picks up a changed file; never force a restart.
+  docker cp "$XML" "$C:$DST.new" >/dev/null
+  docker exec "$C" sh -c '
+    set -e
+    dst=$1
+    if [ -f "$dst" ] && cmp -s "$dst.new" "$dst"; then
+      rm -f "$dst.new"
+    else
+      chmod 644 "$dst.new"
+      mv -f "$dst.new" "$dst"
+    fi
+    chmod 644 "$dst"
+  ' sh "$DST"
+}
+
+ensure_regional_settings() {
+  local WANT_TZ=Asia/Shanghai WANT_LOCALE=zh-CN CURRENT
+  CURRENT=$(docker exec "$C" getprop persist.sys.timezone 2>/dev/null | tr -d '\r' || true)
+  if [ "$CURRENT" != "$WANT_TZ" ]; then
+    docker exec "$C" setprop persist.sys.timezone "$WANT_TZ"
+    docker exec "$C" settings put global auto_time_zone 0 >/dev/null 2>&1 || true
+    docker exec "$C" service call alarm 3 s16 "$WANT_TZ" >/dev/null 2>&1 || true
+  fi
+  CURRENT=$(docker exec "$C" getprop persist.sys.locale 2>/dev/null | tr -d '\r' || true)
+  [ "$CURRENT" = "$WANT_LOCALE" ] || docker exec "$C" setprop persist.sys.locale "$WANT_LOCALE"
+  CURRENT=$(docker exec "$C" settings get global system_locales 2>/dev/null | tr -d '\r' || true)
+  [ "$CURRENT" = "$WANT_LOCALE" ] || docker exec "$C" settings put global system_locales "$WANT_LOCALE"
+}
+
 ensure_adbkeyboard() {
   # 容器是 docker run 重建的，装过的 IME 会丢：从 /srv/redroid/apk 补装。
   # 只安装 + enable，不改默认输入法（改了 WeChat 侧容易看出被接管）。
@@ -173,6 +234,7 @@ if docker inspect "$C" >/dev/null 2>&1; then
 else
   create
 fi
+ensure_excluded_hardware
 B=""
 for i in $(seq 1 60); do
   B=$(docker exec "$C" getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
@@ -180,6 +242,7 @@ for i in $(seq 1 60); do
   sleep 3
 done
 [ "$B" = "1" ] || { echo "$C boot timeout" >&2; exit 1; }
+ensure_regional_settings
 # Harden: remove root/adb helpers and ADB keyboard; keep LatinIME for login.
 docker exec "$C" sh -c 'for p in /system/xbin/su /system/bin/su /sbin/su /su/bin/su /system/sbin/su; do rm -f "$p"; done' || true
 # ADBKeyboard：控制台用广播打中文（input text 只支持 ASCII）。

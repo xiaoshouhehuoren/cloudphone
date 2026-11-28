@@ -2989,10 +2989,18 @@ select{width:100%;background:#0c151e;color:var(--txt);border:1px solid var(--lin
 .kv:last-child{border-bottom:0}.kv b{color:var(--txt);font-weight:600}
 .log{margin-top:10px;font-size:12px;line-height:1.55;color:#a9bbcb;min-height:34px;word-break:break-word}
 .hint{margin-top:12px;font-size:11px;line-height:1.65;color:#6f8396}
+.sensorhead{display:flex;align-items:center;justify-content:space-between;gap:10px}.sensorhead b{font-size:13px}
+#sensorcard .sensorToggle{display:flex;align-items:center;gap:6px;margin:0;color:var(--txt);font-size:12px;white-space:nowrap}
+#sensorConsent{width:18px;height:18px;accent-color:var(--acc)}
+.sensorline{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px;color:var(--mut)}
+#sensorDot{width:8px;height:8px;border-radius:50%;background:#3a4654;flex:0 0 auto}#sensorDot.on{background:var(--ok)}#sensorDot.bad{background:#f2555a}
+.sensorgrid{display:grid;grid-template-columns:1fr;gap:6px;margin-top:10px}.sensoritem{background:#0c151e;border:1px solid var(--line);border-radius:9px;padding:7px 9px}
+.sensoritem span{font-size:10px;color:var(--mut)}.sensoritem b{display:block;margin-top:2px;font-size:11px;font-weight:500;color:var(--txt);font-variant-numeric:tabular-nums;word-break:break-all}
+#sensorAsk{width:100%;margin-top:10px;padding:9px;font-size:12px}
 </style></head><body>
 <div class="top"><div><div class="eyebrow">G98 · CAMERA BRIDGE</div><h1>手机摄像头</h1><div class="mini" id="sub">正在准备…</div></div><span id="dot"></span></div>
-<div class="preview"><video id="pv" playsinline autoplay muted></video><div class="placeholder" id="ph">点击「开启摄像头」<br>把这部手机的画面送进云手机</div><div class="badge" id="state">未开启</div></div>
-<div class="row"><button class="primary" id="start">开启摄像头</button><button id="stop" disabled>停止</button><button id="flip" disabled>切换</button></div>
+<div class="preview"><video id="pv" playsinline autoplay muted></video><div class="placeholder" id="ph">点击「开启并同步」<br>把这部手机的画面与真实运动送进云手机</div><div class="badge" id="state">未开启</div></div>
+<div class="row"><button class="primary" id="start">开启并同步</button><button id="stop" disabled>停止</button><button id="flip" disabled>切换</button></div>
 <div class="card">
 <label for="node">注入到云手机相机节点</label>
 <select id="node"><option value="/dev/video10">后置摄像头（/dev/video10）</option><option value="/dev/video11">前置摄像头（/dev/video11）</option></select>
@@ -3000,6 +3008,22 @@ select{width:100%;background:#0c151e;color:var(--txt);border:1px solid var(--lin
 <div class="kv"><span>画质</span><b>WebRTC · 自适应</b></div>
 <div class="kv"><span>已发送</span><b id="frames">0 帧</b></div>
 <div class="kv"><span>数据量</span><b id="bytes">0.0 MB</b></div>
+<div class="kv"><span>实际采集</span><b id="capture">未开启</b></div>
+<div class="kv"><span>编码限制</span><b id="quality">未报告</b></div>
+</div>
+<div class="card" id="sensorcard">
+<div class="sensorhead"><b>手机真实运动 / 方向</b><label class="sensorToggle"><input type="checkbox" id="sensorConsent" checked>随推流同步</label></div>
+<div class="mini">开启按钮即为本机传感器授权入口；可随时取消勾选，视频推流不受影响。</div>
+<div class="sensorline"><span id="sensorDot"></span><span id="sensorState">待授权 · 将随推流启动</span></div>
+<div class="sensorgrid">
+<div class="sensoritem"><span>acc 加速度</span><b id="sensor-acc">未开启</b></div>
+<div class="sensoritem"><span>gyro 陀螺仪</span><b id="sensor-gyro">未开启</b></div>
+<div class="sensoritem"><span>rv 旋转矢量</span><b id="sensor-rv">未开启</b></div>
+</div>
+<div class="kv"><span>发送频率 / 最近真实更新</span><b id="sensorMeta">未发送 · 尚无真实更新</b></div>
+<div class="mini" id="sensorOther">其他真实读数：暂无</div>
+<button id="sensorAsk">授权 / 重试传感器</button>
+<div class="hint">仅转发 Generic Sensor、DeviceMotion、DeviceOrientation 的真实事件；不生成模拟传感器数据。iOS 授权必须由本页按钮手势触发。</div>
 </div>
 <div class="log" id="log">等待开启摄像头…</div>
 <div class="hint">手机和板子需要连同一个网络。首次使用请允许摄像头权限；如果浏览器提示证书不安全，选择「高级 → 继续访问」。推流成功后云手机会自动打开相机预览。</div>
@@ -3019,9 +3043,170 @@ var canvas=document.createElement('canvas'); canvas.width=480; canvas.height=360
 var ctx=canvas.getContext('2d',{willReadFrequently:true});
 var stream=null, ws=null, pc=null, videoSender=null, timer=null, whipTimer=null, whipStats=null, camStarted=false, frames=0, bytes=0, busy=false, facing=(q.get('facing')==='user'?'user':'environment'), closedByUs=false;
 var reconnects=0, reconnectTimer=null, discTimer=null;
+// 相机页传感器同步：真实源优先级 Generic Sensor > DeviceMotion/Orientation；每个槽位只归属一个源。
+var sensorConsent=document.getElementById('sensorConsent'), sensorAsk=document.getElementById('sensorAsk');
+var SENSOR_SLOTS=[['acc',3],['gyro',3],['mag',3],['rv',4],['grav',3],['lin',3],['light',1],['prox',1],['pressure',1],['step',1]];
+var SENSOR_GENERIC={acc:'Accelerometer',gyro:'Gyroscope',mag:'Magnetometer',rv:'AbsoluteOrientationSensor',grav:'GravitySensor',lin:'LinearAccelerationSensor',light:'AmbientLightSensor',prox:'ProximitySensor'};
+var sensorWanted=false, sensorAuthorized=false, sensorRun=0, sensorPermission=null, sensorWs=null, sensorTimer=null, sensorUiTimer=null, sensorReconnect=null;
+var sensorCtrls={}, sensorReadings={}, sensorSources={}, sensorLegacy={motion:false,orientation:false};
+var sensorSeq=0, sensorSent=0, sensorFps=0, sensorStatsAt=0, sensorStatsSent=0, sensorLastReal=0, sensorAck=0, sensorLastOn=0;
+var sensorMonoLast=0, sensorWallBase=Date.now();
+function sensorMono(){
+  var n; try{n=window.performance&&typeof performance.now==='function'?performance.now():Date.now()-sensorWallBase;}catch(e){n=Date.now()-sensorWallBase;}
+  if(n<sensorMonoLast)n=sensorMonoLast; sensorMonoLast=n; return n;
+}
+function sensorSet(s,kind){document.getElementById('sensorState').textContent=s;document.getElementById('sensorDot').className=kind||'';}
+function sensorAge(at){if(!at)return '尚无真实更新';var ms=Math.max(0,Date.now()-at);return ms<1000?Math.round(ms)+'ms前':(ms/1000).toFixed(1)+'s前';}
+function sensorArray(a,n){
+  if(!a||a.length<n)return null; var out=[];
+  for(var i=0;i<n;i++){if(typeof a[i]!=='number'||!isFinite(a[i]))return null;out.push(a[i]);}
+  return out;
+}
+function sensorRecord(k,a,source){
+  if(!sensorWanted||sensorSources[k]!==source)return;
+  var n=3;for(var i=0;i<SENSOR_SLOTS.length;i++){if(SENSOR_SLOTS[i][0]===k){n=SENSOR_SLOTS[i][1];break;}}
+  var v=sensorArray(a,n);if(!v)return;
+  sensorReadings[k]={v:v,at:Date.now(),mono:sensorMono(),source:source};sensorLastReal=Date.now();
+}
+function sensorNeedsPermission(){
+  return !!((window.DeviceMotionEvent&&window.DeviceMotionEvent.requestPermission)||(window.DeviceOrientationEvent&&window.DeviceOrientationEvent.requestPermission));
+}
+function sensorRequestPermission(){
+  // 两个 iOS 请求都在调用栈内同步发起；本函数只能由真实按钮/开关手势调用。
+  var waits=[];
+  try{if(window.DeviceMotionEvent&&window.DeviceMotionEvent.requestPermission)waits.push(window.DeviceMotionEvent.requestPermission());}catch(e){return Promise.resolve(false);}
+  try{if(window.DeviceOrientationEvent&&window.DeviceOrientationEvent.requestPermission)waits.push(window.DeviceOrientationEvent.requestPermission());}catch(e){return Promise.resolve(false);}
+  if(!waits.length)return Promise.resolve(true);
+  return Promise.all(waits).then(function(rs){for(var i=0;i<rs.length;i++){if(rs[i]!=='granted')return false;}return true;},function(){return false;});
+}
+function sensorOnMotion(e){
+  var a=e.accelerationIncludingGravity||e.acceleration;if(a)sensorRecord('acc',[a.x,a.y,a.z],'DeviceMotion');
+  var l=e.acceleration;if(l)sensorRecord('lin',[l.x,l.y,l.z],'DeviceMotion');
+  var r=e.rotationRate;if(r)sensorRecord('gyro',[(r.beta==null?null:r.beta*Math.PI/180),(r.gamma==null?null:r.gamma*Math.PI/180),(r.alpha==null?null:r.alpha*Math.PI/180)],'DeviceMotion');
+}
+function sensorOnOrientation(e){
+  if(typeof e.alpha!=='number'||typeof e.beta!=='number'||typeof e.gamma!=='number'||!isFinite(e.alpha)||!isFinite(e.beta)||!isFinite(e.gamma))return;
+  var z=e.alpha*Math.PI/360,x=e.beta*Math.PI/360,y=e.gamma*Math.PI/360;
+  var cz=Math.cos(z),sz=Math.sin(z),cx=Math.cos(x),sx=Math.sin(x),cy=Math.cos(y),sy=Math.sin(y);
+  sensorRecord('rv',[sx*cy*cz-cx*sy*sz,cx*sy*cz+sx*cy*sz,cx*cy*sz-sx*sy*cz,cx*cy*cz+sx*sy*sz],'DeviceOrientation');
+}
+function sensorEnsureLegacy(){
+  if(!sensorWanted)return;
+  if(window.DeviceMotionEvent){
+    var ks=['acc','gyro','lin'];for(var i=0;i<ks.length;i++){var k=ks[i];if(!sensorCtrls[k]&&!sensorSources[k])sensorSources[k]='DeviceMotion';}
+    if(!sensorLegacy.motion){window.addEventListener('devicemotion',sensorOnMotion,true);sensorLegacy.motion=true;}
+  }
+  if(window.DeviceOrientationEvent){
+    if(!sensorCtrls.rv&&!sensorSources.rv)sensorSources.rv='DeviceOrientation';
+    if(!sensorLegacy.orientation){window.addEventListener('deviceorientation',sensorOnOrientation,true);sensorLegacy.orientation=true;}
+  }
+}
+function sensorGeneric(k){
+  var name=SENSOR_GENERIC[k], C=name&&window[name];if(!C)return false;
+  var ctl;
+  try{ctl=new C({frequency:25});}catch(e){return false;}
+  sensorCtrls[k]=ctl;sensorSources[k]='Generic Sensor';
+  ctl.addEventListener('reading',function(){
+    var a;if(k==='rv')a=ctl.quaternion;else if(k==='light')a=[ctl.illuminance];else if(k==='prox')a=[ctl.distance];else a=[ctl.x,ctl.y,ctl.z];
+    sensorRecord(k,a,'Generic Sensor');
+  });
+  ctl.addEventListener('error',function(){
+    if(sensorCtrls[k]!==ctl)return;try{ctl.stop();}catch(e){}delete sensorCtrls[k];
+    if(sensorSources[k]==='Generic Sensor')delete sensorSources[k];sensorEnsureLegacy();
+    if(sensorWanted)sensorSet('传感器源已切换 · 等待真实读数','');
+  });
+  try{ctl.start();return true;}catch(e){delete sensorCtrls[k];if(sensorSources[k]==='Generic Sensor')delete sensorSources[k];return false;}
+}
+function sensorStartSources(){for(var i=0;i<SENSOR_SLOTS.length;i++){sensorGeneric(SENSOR_SLOTS[i][0]);}sensorEnsureLegacy();}
+function sensorStopSources(){
+  Object.keys(sensorCtrls).forEach(function(k){try{sensorCtrls[k].stop();}catch(e){}});sensorCtrls={};
+  if(sensorLegacy.motion){window.removeEventListener('devicemotion',sensorOnMotion,true);sensorLegacy.motion=false;}
+  if(sensorLegacy.orientation){window.removeEventListener('deviceorientation',sensorOnOrientation,true);sensorLegacy.orientation=false;}
+}
+function sensorUpdate(){
+  var now=sensorMono();
+  if(sensorStatsAt&&now-sensorStatsAt>=1000){sensorFps=(sensorSent-sensorStatsSent)*1000/(now-sensorStatsAt);sensorStatsAt=now;sensorStatsSent=sensorSent;}
+  ['acc','gyro','rv'].forEach(function(k){
+    var r=sensorReadings[k],txt=sensorWanted?'等待真实读数':'未开启';
+    if(r)txt=(now-r.mono<=1500?'真实 · ':'最后真实 · ')+r.source+' ['+r.v.map(function(x){return Math.round(x*100)/100;}).join(', ')+'] · '+sensorAge(r.at);
+    document.getElementById('sensor-'+k).textContent=txt;
+  });
+  var other=[];for(var i=0;i<SENSOR_SLOTS.length;i++){
+    var k=SENSOR_SLOTS[i][0];if(k==='acc'||k==='gyro'||k==='rv')continue;var r=sensorReadings[k];
+    if(r&&now-r.mono<=1500)other.push(k+' ['+r.v.map(function(x){return Math.round(x*100)/100;}).join(', ')+']');
+  }
+  document.getElementById('sensorOther').textContent='其他真实读数：'+(other.join('；')||'暂无');
+  document.getElementById('sensorMeta').textContent=(sensorWanted?sensorFps.toFixed(1)+' Hz · seq '+sensorSeq+(sensorAck?' · ack '+sensorAck:''):'未发送')+' · '+sensorAge(sensorLastReal);
+}
+function sensorSend(){
+  if(!sensorWanted||!sensorWs||sensorWs.readyState!==1)return;
+  var now=sensorMono(),p={on:[],v:{},t:Date.now(),seq:++sensorSeq,mono:now};
+  for(var i=0;i<SENSOR_SLOTS.length;i++){
+    var k=SENSOR_SLOTS[i][0],r=sensorReadings[k];if(!r||now-r.mono>1500)continue;
+    p.on.push(k);p.v[k]=r.v.slice(0,SENSOR_SLOTS[i][1]);
+  }
+  try{
+    sensorWs.send(JSON.stringify(p));sensorSent++;
+    if(p.on.length&&!sensorLastOn)sensorSet('真实读数同步中','on');
+    else if(!p.on.length&&sensorLastOn)sensorSet('已连接 · 等待真实读数','');
+    sensorLastOn=p.on.length;
+  }catch(e){sensorSet('传感器发送失败','bad');try{sensorWs.close();}catch(x){}}
+}
+function sensorWsOpen(){
+  if(!sensorWanted||(sensorWs&&(sensorWs.readyState===0||sensorWs.readyState===1)))return;
+  var proto=location.protocol==='https:'?'wss://':'ws://',sock;
+  try{sock=new WebSocket(proto+location.host+'/ws/sensor?name='+encodeURIComponent(dev));}catch(e){sensorSet('传感器连接失败','bad');return;}
+  sensorWs=sock;
+  sock.onopen=function(){if(sock!==sensorWs)return;sensorLastOn=0;sensorSet('已连接 · 等待真实读数','');sensorSend();};
+  sock.onmessage=function(ev){try{var m=JSON.parse(ev.data);if(m&&m.type==='ack'&&typeof m.seq==='number')sensorAck=m.seq;}catch(e){}};
+  sock.onerror=function(){if(sock===sensorWs)sensorSet('传感器连接异常','bad');};
+  sock.onclose=function(){
+    if(sock===sensorWs)sensorWs=null;if(!sensorWanted)return;sensorSet('传感器连接断开 · 重试中','bad');
+    if(!sensorReconnect)sensorReconnect=setTimeout(function(){sensorReconnect=null;sensorWsOpen();},1000);
+  };
+}
+function sensorStart(){
+  if(!sensorConsent.checked||!stream)return;
+  if(sensorTimer||sensorUiTimer)return;
+  if(!sensorAuthorized){sensorSet('待授权 · 点击开启或授权按钮','bad');return;}
+  sensorWanted=true;var run=++sensorRun;
+  sensorSeq=0;sensorSent=0;sensorFps=0;sensorStatsAt=sensorMono();sensorStatsSent=0;sensorLastReal=0;sensorAck=0;sensorLastOn=0;
+  sensorReadings={};sensorSources={};sensorSet('等待传感器授权…','');
+  if(!sensorPermission&&sensorNeedsPermission()){sensorSet('需要点击「授权 / 重试传感器」手势授权','bad');return;}
+  var perm=sensorPermission||Promise.resolve(true);
+  perm.then(function(ok){
+    if(run!==sensorRun||!sensorWanted||!stream)return;
+    if(!ok){sensorSet('传感器授权被拒绝 · 视频仍继续','bad');return;}
+    sensorStartSources();sensorWsOpen();sensorTimer=setInterval(sensorSend,40);sensorUiTimer=setInterval(sensorUpdate,250);sensorUpdate();
+  },function(){if(run===sensorRun&&sensorWanted)sensorSet('传感器授权失败 · 视频仍继续','bad');});
+}
+function sensorStop(reason){
+  sensorWanted=false;sensorRun++;
+  if(sensorTimer){clearInterval(sensorTimer);sensorTimer=null;}if(sensorUiTimer){clearInterval(sensorUiTimer);sensorUiTimer=null;}
+  if(sensorReconnect){clearTimeout(sensorReconnect);sensorReconnect=null;}
+  if(sensorWs){try{sensorWs.onclose=null;sensorWs.close();}catch(e){}sensorWs=null;}
+  sensorStopSources();sensorReadings={};sensorSources={};sensorFps=0;sensorLastOn=0;sensorSet(reason||'已停止同步','');sensorUpdate();
+}
+sensorAsk.addEventListener('click',function(){
+  sensorConsent.checked=true;sensorAuthorized=true;sensorPermission=sensorRequestPermission();
+  if(stream){sensorStart();return;}
+  var run=sensorRun;sensorPermission.then(function(ok){if(!stream&&run===sensorRun)sensorSet(ok?'授权完成 · 等待推流':'传感器授权被拒绝',ok?'':'bad');});
+});
+sensorConsent.addEventListener('change',function(){
+  if(!sensorConsent.checked){sensorAuthorized=false;sensorStop('已手动关闭');return;}
+  sensorAuthorized=true;sensorPermission=sensorRequestPermission();if(stream)sensorStart();else sensorSet('已选择同步 · 等待推流','');
+});
 // 手机浏览器可能默认采集 90/120fps；采集和 WebRTC 发送必须同时限到 30fps。
-var CAPTURE_FPS=30, sendFps=0, sendKbps=0, lastFrames=0, lastBytes=0, lastStatsAt=0;
+var CAPTURE_FPS=30, sendFps=null, sendKbps=0, lastFrames=0, lastBytes=0, lastStatsAt=0;
 function cameraConstraints(){ return {audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:CAPTURE_FPS,max:CAPTURE_FPS}}}; }
+function showTrackSettings(s){
+  var el=document.getElementById('capture'),t=s&&s.getVideoTracks&&s.getVideoTracks()[0],g={};
+  if(!t){el.textContent='无视频轨';return;}
+  try{g=t.getSettings?t.getSettings():{};}catch(e){}
+  var wh=typeof g.width==='number'&&g.width>0&&typeof g.height==='number'&&g.height>0?g.width+'×'+g.height:'尺寸未报告';
+  var fps=typeof g.frameRate==='number'&&isFinite(g.frameRate)&&g.frameRate>0?(Math.round(g.frameRate*100)/100)+' fps':'帧率未报告';
+  el.textContent=wh+' · '+fps;
+}
 function limitCapture(s){
   var t=s&&s.getVideoTracks&&s.getVideoTracks()[0]; if(!t) return Promise.resolve();
   try{ t.contentHint='motion'; }catch(e){}
@@ -3044,7 +3229,7 @@ function state(s,on){ document.getElementById('state').textContent=s; var d=docu
 function stopPump(){ if(timer){ clearInterval(timer); timer=null; } }
 function stopJpegEarly(){ try{ if(jpegTimer){ clearInterval(jpegTimer); jpegTimer=null; } jpegBusy=false; }catch(e){} }
 function stopAll(silent){
-  stopPump(); stopJpegEarly(); closedByUs=true;
+  stopPump(); stopJpegEarly(); sensorStop('已停止同步'); closedByUs=true;
   if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer=null; }
   if(discTimer){ clearTimeout(discTimer); discTimer=null; }
   reconnects=0;
@@ -3161,6 +3346,7 @@ function startJpegFallback(){
 }
 function beginStream(){
   ph.style.display='none'; startBtn.disabled=true; stopBtn.disabled=false; flipBtn.disabled=false;
+  showTrackSettings(stream);document.getElementById('quality').textContent='等待 outbound-rtp…';sensorStart();
   if(q.get('jpeg')==='1'){ startJpegFallback(); return; }
   state('WebRTC 连接中…',true); log('摄像头已打开，正在通过 WebRTC 推流…');
   whipStart().catch(function(e){
@@ -3250,7 +3436,7 @@ function scheduleReconnect(){
 }
 function startWhipStats(p){
   if(whipStats){ clearInterval(whipStats); whipStats=null; }
-  lastFrames=frames; lastBytes=bytes; lastStatsAt=0; sendFps=0; sendKbps=0;
+  lastFrames=frames; lastBytes=bytes; lastStatsAt=0; sendFps=null; sendKbps=0;
   whipStats=setInterval(function(){
     if(!pc||pc!==p) return;
     p.getStats().then(function(rs){
@@ -3258,11 +3444,18 @@ function startWhipStats(p){
         if(r.type==='outbound-rtp'&&r.kind==='video'){
           if(typeof r.framesEncoded==='number') frames=r.framesEncoded;
           if(typeof r.bytesSent==='number') bytes=r.bytesSent;
-          var now=Date.now();
-          if(lastStatsAt){ var dt=(now-lastStatsAt)/1000; if(dt>0){ sendFps=(typeof r.framesPerSecond==='number'?Math.round(r.framesPerSecond):Math.max(0,Math.round((frames-lastFrames)/dt))); sendKbps=Math.max(0,Math.round((bytes-lastBytes)*8/dt/1000)); } }
+          var now=window.performance&&typeof performance.now==='function'?performance.now():Date.now();
+          if(lastStatsAt){
+            var dt=(now-lastStatsAt)/1000;
+            if(dt>0){
+              if(typeof r.framesEncoded==='number'&&r.framesEncoded>=lastFrames)sendFps=Math.max(0,(r.framesEncoded-lastFrames)/dt);
+              sendKbps=Math.max(0,Math.round((bytes-lastBytes)*8/dt/1000));
+            }
+          }
           lastFrames=frames; lastBytes=bytes; lastStatsAt=now;
-          document.getElementById('frames').textContent=frames+' 帧 · '+sendFps+' fps';
+          document.getElementById('frames').textContent=frames+' 帧 · '+(sendFps===null?'等待实测':sendFps.toFixed(1)+' fps 实测（framesEncoded/时间差）');
           document.getElementById('bytes').textContent=(bytes/1048576).toFixed(1)+' MB · '+sendKbps+' kbps';
+          document.getElementById('quality').textContent=typeof r.qualityLimitationReason==='string'&&r.qualityLimitationReason?r.qualityLimitationReason:'未报告';
         }
       });
     }).catch(function(){});
@@ -3303,7 +3496,9 @@ function camStart(){
      camFail((j&&j.error)||'提交失败');
    }).catch(function(e){ camFail(e); });
 }
-function openCam(){
+function openCam(ev){
+  // 自动打开/重连不算用户手势，绝不在这里隐式请求 iOS 权限。
+  if(ev&&ev.isTrusted&&sensorConsent.checked){sensorAuthorized=true;sensorPermission=sensorRequestPermission();}
   if(q.get('test')==='1'){
     stopAll(true);
     var cv=document.createElement('canvas'); cv.width=1280; cv.height=720; var cc=cv.getContext('2d'); var t=0;
@@ -3338,7 +3533,7 @@ function switchFacing(nf){
      if(!t) throw new Error('没有视频轨');
      return videoSender.replaceTrack(t).then(function(){
        if(stream&&stream!==s){ stream.getVideoTracks().forEach(function(o){ if(o!==t){ try{o.stop();}catch(e){} } }); }
-       stream=s; try{ pv.srcObject=s; pv.play().catch(function(){}); }catch(e){} limitCapture(s); limitSender(videoSender);
+       stream=s; try{ pv.srcObject=s; pv.play().catch(function(){}); }catch(e){} limitCapture(s).then(function(){showTrackSettings(s);}); limitSender(videoSender);
        log('已热切换到'+nc+'摄像头，推流未中断');
      });
    })
@@ -3406,7 +3601,12 @@ var q=new URLSearchParams(location.search);
 var DEV=q.get('device')||'wx1', TEST=q.get('test')==='1';
 var SLOTS=[['acc','加速度计',3],['gyro','陀螺仪',3],['mag','磁力计',3],['rv','旋转矢量',4],['grav','重力',3],['lin','线性加速度',3],['light','光线',1],['prox','距离',1],['pressure','气压',1],['step','计步',1]];
 var CTRL={acc:'Accelerometer',gyro:'Gyroscope',mag:'Magnetometer',rv:'AbsoluteOrientationSensor',grav:'GravitySensor',lin:'LinearAccelerationSensor',light:'AmbientLightSensor',prox:'ProximitySensor'};
-var have={}, enabled={}, reading={}, ctrls={}, ws=null, timer=null, t0=Date.now(), sent=0, got=0, mode='';
+var have={}, enabled={}, reading={}, ctrls={}, ws=null, timer=null, fakeTimer=null, t0=Date.now(), sent=0, got=0, mode='';
+var seq=0, mono0=Date.now(), monoLast=0, motionOn=false;
+function monoNow(){
+  var n;try{n=window.performance&&typeof performance.now==='function'?performance.now():Date.now()-mono0;}catch(e){n=Date.now()-mono0;}
+  if(n<monoLast)n=monoLast;monoLast=n;return n;
+}
 document.getElementById('devline').textContent='云手机 '+DEV;
 function $(id){return document.getElementById(id)}
 function toast(m){var s=$('stat');s.textContent=m}
@@ -3451,7 +3651,7 @@ function payload(){
     var a=reading[k]; if(!a||!a.length) return;
     on.push(k); v[k]=a.slice(0,s[2]);
   });
-  return {on:on, v:v, t:Date.now()};
+  return {on:on, v:v, t:Date.now(), seq:++seq, mono:monoNow()};
 }
 function send(force){
   if(!ws||ws.readyState!==1) return;
@@ -3478,21 +3678,32 @@ function startSensors(){
 function stopSensors(){
   Object.keys(ctrls).forEach(function(k){ try{ctrls[k].stop()}catch(e){} delete ctrls[k]; });
 }
+function onMotion(e){
+  var a=e.accelerationIncludingGravity||e.acceleration; if(a&&enabled.acc) reading.acc=[a.x||0,a.y||0,a.z||0];
+  var g=e.acceleration; if(g&&enabled.lin) reading.lin=[g.x||0,g.y||0,g.z||0];
+  var r=e.rotationRate; if(r&&enabled.gyro) reading.gyro=[(r.beta||0)*0.0174533,(r.gamma||0)*0.0174533,(r.alpha||0)*0.0174533];
+}
+function onOrientation(e){
+  if(!enabled.rv) return;
+  var z=(e.alpha||0)*0.0174533/2, x=(e.beta||0)*0.0174533/2, y=(e.gamma||0)*0.0174533/2;
+  var cz=Math.cos(z),sz=Math.sin(z),cx=Math.cos(x),sx=Math.sin(x),cy=Math.cos(y),sy=Math.sin(y);
+  reading.rv=[sx*cy*cz-cx*sy*sz, cx*sy*cz+sx*cy*sz, cx*cy*sz-sx*sy*cz, cx*cy*cz+sx*sy*sz];
+}
 function motion(){
-  window.addEventListener('devicemotion',function(e){
-    var a=e.accelerationIncludingGravity||e.acceleration; if(a&&enabled.acc) reading.acc=[a.x||0,a.y||0,a.z||0];
-    var g=e.acceleration; if(g&&enabled.lin) reading.lin=[g.x||0,g.y||0,g.z||0];
-    var r=e.rotationRate; if(r&&enabled.gyro) reading.gyro=[(r.beta||0)*0.0174533,(r.gamma||0)*0.0174533,(r.alpha||0)*0.0174533];
-  },true);
-  window.addEventListener('deviceorientation',function(e){
-    if(!enabled.rv) return;
-    var z=(e.alpha||0)*0.0174533/2, x=(e.beta||0)*0.0174533/2, y=(e.gamma||0)*0.0174533/2;
-    var cz=Math.cos(z),sz=Math.sin(z),cx=Math.cos(x),sx=Math.sin(x),cy=Math.cos(y),sy=Math.sin(y);
-    reading.rv=[sx*cy*cz-cx*sy*sz, cx*sy*cz+sx*cy*sz, cx*cy*sz-sx*sy*cz, cx*cy*cz+sx*sy*sz];
-  },true);
+  if(motionOn)return;
+  window.addEventListener('devicemotion',onMotion,true);
+  window.addEventListener('deviceorientation',onOrientation,true);
+  motionOn=true;
+}
+function stopMotion(){
+  if(!motionOn)return;
+  window.removeEventListener('devicemotion',onMotion,true);
+  window.removeEventListener('deviceorientation',onOrientation,true);
+  motionOn=false;
 }
 function fake(){
-  setInterval(function(){
+  if(fakeTimer)clearInterval(fakeTimer);
+  fakeTimer=setInterval(function(){
     var t=(Date.now()-t0)/1000;
     reading.acc=[1.25*Math.sin(t),1.25*Math.cos(t),9.8];
     reading.gyro=[0.3*Math.sin(t*2),0.3*Math.cos(t*2),0.1];
@@ -3529,7 +3740,8 @@ function on(){
 function off(){
   $('sw').classList.remove('on');
   if(timer){ clearInterval(timer); timer=null; }
-  stopSensors();
+  if(fakeTimer){clearInterval(fakeTimer);fakeTimer=null;}
+  stopMotion();stopSensors();
   try{ if(ws) ws.close(); }catch(e){}
   ws=null; dot(''); toast('已停止同步');
 }
@@ -4150,6 +4362,33 @@ SENSOR_NAMES = {"acc": "加速度计", "gyro": "陀螺仪", "mag": "磁力计", 
 
 def sensor_live_path(name):
     return "/srv/redroid/%s/local/tmp/g98-sensors-live.bin" % name
+
+
+def sensor_packet_order(msg, last_seq=None, last_mono=None):
+    """校验可选序号/单调时钟；缺字段的旧包兼容，非法或乱序的新包返回 None。"""
+    seq = msg.get("seq")
+    mono = msg.get("mono")
+    try:
+        if seq is not None:
+            if isinstance(seq, bool):
+                return None
+            seq_value = seq
+            seq = int(seq)
+            if seq < 0 or seq != seq_value:
+                return None
+            if last_seq is not None and seq <= last_seq:
+                return None
+        if mono is not None:
+            if isinstance(mono, bool) or not isinstance(mono, (int, float)):
+                return None
+            mono = float(mono)
+            if not math.isfinite(mono) or mono < 0:
+                return None
+            if last_mono is not None and mono < last_mono:
+                return None
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return seq, mono
 
 
 def sensor_write_live(name, on, vals):
@@ -5670,6 +5909,8 @@ class Handler(BaseHTTPRequestHandler):
         self._ws_send(json.dumps({"type": "hello", "device": name,
                                   "slots": [k for k, _i in SENSOR_SLOTS]}))
         last_ack = 0.0
+        last_seq = last_mono = None
+        dropped = 0
         try:
             os.makedirs(os.path.dirname(sensor_live_path(name)), exist_ok=True)
         except OSError:
@@ -5699,6 +5940,11 @@ class Handler(BaseHTTPRequestHandler):
                     msg = json.loads(data.decode("utf-8", "replace"))
                 except Exception:  # noqa: BLE001
                     continue
+                order = sensor_packet_order(msg, last_seq, last_mono)
+                if order is None:
+                    dropped += 1
+                    continue
+                seq, mono = order
                 on = msg.get("on") or []
                 if not isinstance(on, list):
                     on = []
@@ -5711,10 +5957,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._ws_send(json.dumps({"type": "error", "error": str(exc)}))
                     time.sleep(0.2)
                     continue
+                if seq is not None:
+                    last_seq = seq
+                if mono is not None:
+                    last_mono = mono
                 now = time.time()
                 if now - last_ack >= 1.0:
                     last_ack = now
-                    self._ws_send(json.dumps({"type": "ack", "mask": m, "n": len(on)}))
+                    ack = {"type": "ack", "mask": m, "n": len(on)}
+                    if last_seq is not None:
+                        ack["seq"] = last_seq
+                    if dropped:
+                        ack["dropped"] = dropped
+                    self._ws_send(json.dumps(ack))
         except Exception:  # noqa: BLE001
             pass
         finally:
