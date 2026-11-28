@@ -1599,9 +1599,9 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
           <option value="1">开（默认，切前置也能看到）</option>
           <option value="0">关（只注入所选节点）</option>
         </select>
-        <label class="mini">前置镜像（真机自拍取景是镜面）</label>
+        <label class="mini">前置镜像补偿（抵消相机 App 自拍镜像）</label>
         <select id="cammir">
-          <option value="">自动（跟随真机：前置是镜像，后置不翻）</option>
+          <option value="">自动（前置翻转，后置不翻）</option>
           <option value="0">不翻转</option>
           <option value="1">翻转（左右镜像）</option>
         </select>
@@ -3007,6 +3007,12 @@ select{width:100%;background:#0c151e;color:var(--txt);border:1px solid var(--lin
 (function(){
 var q=new URLSearchParams(location.search);
 var dev=q.get('device')||'wx1';
+// 方向对齐：把手机姿态角上报给云机，云机按「云屏旋转 - 传感器安装角(±手机姿态)」
+// 计算注入旋转；角度不变时服务端不会重设源，因此周期上报不会打断画面。
+function orientAngle(){try{if(screen.orientation&&typeof screen.orientation.angle==='number'){return ((screen.orientation.angle%360)+360)%360;}if(typeof window.orientation==='number'){return ((window.orientation%360)+360)%360;}}catch(e){}return 0;}
+function orientReport(){try{fetch('/api/cam/orient',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:dev,phone:orientAngle()})}).catch(function(){});}catch(e){}}
+window.addEventListener('orientationchange',function(){setTimeout(orientReport,400);});
+setInterval(orientReport,4000);
 var node=q.get('node')||'/dev/video10';
 var pv=document.getElementById('pv'), ph=document.getElementById('ph');
 var canvas=document.createElement('canvas'); canvas.width=480; canvas.height=360;
@@ -4200,6 +4206,86 @@ def cam_pair_node(name, node):
     if node == front:
         return back
     return None
+
+
+# ---- 方向对齐：手机姿态 + 云手机屏幕旋转 + 前后摄 ----
+# HAL 的 sensor.orientation 固定为真机值 90（raw 帧横向，App/SDK 负责旋转）。
+# Camera2 显示旋转 = (SENSOR - DISPLAY)（后摄），因此注入端必须先把源帧旋转
+# DISPLAY - SENSOR，屏幕上的内容才正立；SENSOR 从 0 改成 90 之后，注入端
+# 不预旋转的话整个画面会转 90°。手机推流若已按自身屏幕校正（upright，常见），
+# 手机姿态已体现在像素里；若输出固定方向的 raw 流，再按手机姿态角 P 补 ±P。
+CAM_SENSOR_ORIENTATION = 90
+CAM_ORIENT = {}
+CAM_ORIENT_ROT = {}
+
+
+def cam_orient_state(name):
+    st = CAM_ORIENT.get(name)
+    if st is None:
+        st = {"auto": True, "phone": 0, "phone_mode": "upright", "raw_sign": -1}
+        CAM_ORIENT[name] = st
+    return st
+
+
+def cam_display_rotation(name, ttl=2.0):
+    """云手机屏幕当前旋转角 0/90/180/270（短缓存，避免频繁 dumpsys）。"""
+    ent = CAM_ORIENT_ROT.get(name)
+    now = time.time()
+    if ent and now - ent[0] < ttl:
+        return ent[1]
+    rot = 0
+    try:
+        rc, out, err = dexec(name, ["dumpsys", "window", "displays"], timeout=8)
+        m = re.search(r"mCurrentRotation=(\d+)", out or "")
+        if not m:
+            m = re.search(r"rotation=(\d+)", out or "")
+        if m:
+            rot = (int(m.group(1)) * 90) % 360
+    except Exception:  # noqa: BLE001
+        rot = 0
+    CAM_ORIENT_ROT[name] = (now, rot)
+    return rot
+
+
+def cam_orient_compute(name):
+    st = cam_orient_state(name)
+    disp = cam_display_rotation(name)
+    phone = int(st.get("phone") or 0) % 360
+    if st.get("phone_mode") == "raw":
+        rot = (disp - CAM_SENSOR_ORIENTATION + int(st.get("raw_sign") or -1) * phone) % 360
+    else:
+        rot = (disp - CAM_SENSOR_ORIENTATION) % 360
+    return {"rotate": rot, "display": disp, "sensor": CAM_SENSOR_ORIENTATION,
+            "phone": phone, "phone_mode": st.get("phone_mode"),
+            "raw_sign": st.get("raw_sign"), "auto": bool(st.get("auto"))}
+
+
+def cam_orient_apply(name):
+    """方向变化后重算并下发；只重启 camd 的读取器，不动 provider/cameraserver。"""
+    oc = cam_orient_compute(name)
+    applied = []
+    if not oc["auto"]:
+        return {"ok": True, "applied": applied, "orient": oc}
+    back, front = cam_nodes_for(name)
+    for node in (back, front):
+        snap = cam_camd_node_state(node) or {}
+        kind = snap.get("kind")
+        if kind not in ("rtsp", "image", "video"):
+            continue
+        geo = dict(snap.get("geometry") or {})
+        if int(geo.get("rotate") or 0) == oc["rotate"]:
+            continue
+        try:
+            cam_camd_set(node, kind, snap.get("arg"), timeout=8.0, geom={
+                "fit": geo.get("fit"), "rotate": oc["rotate"],
+                "mirror": geo.get("mirror"), "ystretch": geo.get("ystretch")})
+            cam_keepf(node, 1)
+            applied.append({"node": node, "rotate": oc["rotate"]})
+        except Exception as exc:  # noqa: BLE001
+            _alog("cam orient apply %s %s failed %s" % (name, node, str(exc)[:120]))
+    return {"ok": True, "applied": applied, "orient": oc}
+
+
 CAM_PROVIDER = "vendor.camera-provider-2-4-legacy"
 
 
@@ -4526,6 +4612,14 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
     "Camera error: Can't connect to the camera." 对话框，而状态里却写着 streaming。
     """
     cam_idle("stop")
+    geom = dict(geom or {})
+    if kind in ("image", "video", "stream"):
+        ost = cam_orient_state(name)
+        if ost.get("auto") and geom.get("rotate") is None:
+            oc = cam_orient_compute(name)
+            geom["rotate"] = oc["rotate"]
+            _alog("cam orient %s display=%d phone=%d(%s) -> rotate=%d"
+                  % (name, oc["display"], oc["phone"], oc["phone_mode"], oc["rotate"]))
     cam_camd_set(node, cam_camd_kind(kind), path, geom=geom)
     cam_keepf(node, 1)
     # 默认把同一个源也下发给另一路（后置 <-> 前置）。相机 App 记住上次摄像头时，
@@ -5393,6 +5487,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "qrencode 不可用"}, 500)
             return self._json({"ok": True, "host": host, "port": TLS_PORT,
                                "png": "data:image/png;base64," + base64.b64encode(png).decode()})
+        if p == "/api/cam/orient":
+            name = (qs.get("name") or ["wx1"])[0]
+            if not NAME_RE.match(name or ""):
+                return self._json({"error": "bad name"}, 400)
+            return self._json({"ok": True, "orient": cam_orient_compute(name),
+                               "state": cam_orient_state(name)})
         if p == "/api/cam/status":
             name = (qs.get("name") or ["wx1"])[0]
             if not NAME_RE.match(name or ""):
@@ -6022,6 +6122,22 @@ class Handler(BaseHTTPRequestHandler):
             comp = str(body.get("component") or "com.tencent.mm/com.tencent.mm.ui.LauncherUI")
             rc, out, err = dexec(name, ["am", "start", "-n", comp], timeout=25)
             return self._json({"ok": rc == 0, "error": (out + err).strip()[:200] or None})
+        if p == "/api/cam/orient":
+            st = cam_orient_state(name)
+            try:
+                if body.get("phone") is not None:
+                    st["phone"] = int(body.get("phone")) % 360
+            except (TypeError, ValueError):
+                return self._json({"error": "bad phone angle"}, 400)
+            if body.get("auto") is not None:
+                st["auto"] = bool(body.get("auto"))
+            if str(body.get("phone_mode") or "") in ("upright", "raw"):
+                st["phone_mode"] = str(body.get("phone_mode"))
+            if str(body.get("raw_sign") or "") in ("-1", "1"):
+                st["raw_sign"] = int(body.get("raw_sign"))
+            if body.get("apply", True):
+                return self._json(cam_orient_apply(name))
+            return self._json({"ok": True, "applied": [], "orient": cam_orient_compute(name)})
         if p == "/api/cam/start":
             requested = str(body.get("node") or "").strip()
             if requested and not re.match(r"^/dev/video[0-9]{1,2}$", requested):
@@ -6042,11 +6158,14 @@ class Handler(BaseHTTPRequestHandler):
             fit = str(body.get("fit") or "").strip().lower()
             if fit in ("contain", "cover", "stretch"):
                 geom["fit"] = fit
-            try:
-                if int(body.get("rotate") or 0) in (0, 90, 180, 270):
-                    geom["rotate"] = int(body.get("rotate") or 0)
-            except (TypeError, ValueError):
-                pass
+            # 只有显式传 rotate 才固定方向；缺省交给方向对齐（cam_orient_compute）
+            _rv = body.get("rotate")
+            if _rv is not None and str(_rv).strip() != "":
+                try:
+                    if int(_rv) in (0, 90, 180, 270):
+                        geom["rotate"] = int(_rv)
+                except (TypeError, ValueError):
+                    pass
             if body.get("both") is not None:
                 geom["both"] = bool(body.get("both"))
             if body.get("mirror") is not None:

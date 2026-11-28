@@ -38,6 +38,9 @@ python3 verify_api1_preview.py wx1 || FAIL=1
 say "camd injection looks like a real sensor (grain + AE breathing)"
 python3 verify_texture.py || FAIL=1
 
+say "rotated injection must not inherit the legacy ystretch compensation"
+python3 verify_orient_default.py || FAIL=1
+
 say "camd holds last frame when the rtsp source is silent"
 python3 verify_hold.py || FAIL=1
 

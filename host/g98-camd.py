@@ -390,8 +390,16 @@ def source_cmd(kind, arg, geo, fps=None):
                 "-stream_loop", "-1", "-i", arg, "-vf", build_vf(geo, fps or FPS),
                 "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     if kind == "rtsp":
-        return [FFMPEG, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
+        # Low-latency pull: the phone encoder and mediamtx already add delay, so
+        # do not let ffmpeg's demuxer/decoder add its own analysis + reorder
+        # buffering on top (that alone was worth ~1s of lag behind the phone).
+        return [FFMPEG, "-hide_banner", "-loglevel", "error",
+                "-fflags", "nobuffer", "-flags", "low_delay",
+                "-analyzeduration", "0", "-probesize", "32",
+                "-max_delay", "0", "-reorder_queue_size", "0",
+                "-rtsp_transport", "tcp",
                 "-i", arg, "-vf", build_vf(geo, fps or FPS),
+                "-flush_packets", "1",
                 "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     raise ValueError("bad kind " + kind)
 
@@ -783,7 +791,13 @@ class NodeRouter:
             mirror = bool(AUTOFRONT and node_is_front(self.node))
         else:
             mirror = bool(mirror)
-        self.ystretch = YSTRETCH if ystretch is None else float(ystretch)
+        if ystretch is None:
+            # 预拉伸发生在 rotate 之前的宽轴上；rotate=90/270 会把它转成纵向拉伸。
+            # 旋转链路服务的是微信这类按 sensor.orientation 自行转正、且等比显示的
+            # 客户端，本不需要补偿：缺省必须落回 1.0，否则脸被纵向拉长（1.7778 时
+            # 尤其明显）。只有非旋转的老预览路径才继承全局 YSTRETCH 补偿。
+            ystretch = 1.0 if rotate in (90, 270) else YSTRETCH
+        self.ystretch = float(ystretch)
         geo = geometry(src, fit, rotate, mirror, self.ystretch)
         with self.lock:
             old, old_dec = self.reader, self.decoder
