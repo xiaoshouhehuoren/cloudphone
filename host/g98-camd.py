@@ -84,6 +84,9 @@ STATIC_GRAIN = int(os.environ.get("G98_CAMD_STATIC_GRAIN", "5"))
 STATIC_VARIANTS = max(1, int(os.environ.get("G98_CAMD_STATIC_VARIANTS", "6")))
 FRAME_JITTER = float(os.environ.get("G98_CAMD_FRAME_JITTER", "0.18"))
 AE_BREATH = float(os.environ.get("G98_CAMD_AE_BREATH", "0.02"))
+# 手机实时源本身已经有传感器噪声、曝光与帧间隔；再叠一层合成噪声/呼吸/抖动只会
+# 让微信预览出现跳变并干扰反光活体。默认实时源走纯净链路，静态贴图仍保留拟真。
+LIVE_CLEAN = os.environ.get("G98_CAMD_LIVE_CLEAN", "1") == "1"
 AE_PERIOD = float(os.environ.get("G98_CAMD_AE_PERIOD", "19"))
 
 
@@ -338,7 +341,7 @@ def geometry(src, fit=None, rotate=None, mirror=None, ystretch=None):
     }
 
 
-def build_vf(geo, fps=None):
+def build_vf(geo, fps=None, live=False):
     chain = []
     rot = geo["rotate"]
     if rot == 90:
@@ -367,13 +370,16 @@ def build_vf(geo, fps=None):
         chain.append("scale=%d:%d:force_original_aspect_ratio=decrease"
                      % (W, H))
         chain.append("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black" % (W, H))
-    if fps:
+    # 实时流不经过 fps 重采样：源有抖动时 fps 滤镜会主动重复/丢帧，写线程本来
+    # 就只取最新帧，再叠这层会变成可见的画面跳动。
+    if fps and not (live and LIVE_CLEAN):
         chain.append("fps=%d" % fps)
-    # 真机传感器的时域噪声与曝光呼吸：动态源每帧由 ffmpeg 现算，不增加 Python 开销。
-    if GRAIN > 0:
-        chain.append("noise=alls=%d:allf=t+u" % GRAIN)
-    if AE_BREATH > 0 and AE_PERIOD > 0:
-        chain.append("eq=brightness=%f*sin(2*PI*t/%f)" % (AE_BREATH, AE_PERIOD))
+    # 真机传感器的时域噪声与曝光呼吸只补给静态/文件源；实时手机源保持原样。
+    if not (live and LIVE_CLEAN):
+        if GRAIN > 0:
+            chain.append("noise=alls=%d:allf=t+u" % GRAIN)
+        if AE_BREATH > 0 and AE_PERIOD > 0:
+            chain.append("eq=brightness=%f*sin(2*PI*t/%f)" % (AE_BREATH, AE_PERIOD))
     chain.append("format=yuv420p")
     return ",".join(chain)
 
@@ -398,7 +404,7 @@ def source_cmd(kind, arg, geo, fps=None):
                 "-analyzeduration", "0", "-probesize", "32",
                 "-max_delay", "0", "-reorder_queue_size", "0",
                 "-rtsp_transport", "tcp",
-                "-i", arg, "-vf", build_vf(geo, fps or FPS),
+                "-i", arg, "-vf", build_vf(geo, fps or FPS, live=True),
                 "-flush_packets", "1",
                 "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     raise ValueError("bad kind " + kind)
@@ -768,7 +774,7 @@ class NodeRouter:
             period = 1.0 / (STATIC_FPS if is_static
                             else (FPS if kind != "idle" else IDLE_FPS))
             # 真机的帧间隔不是恒定值（曝光/传输抖动），固定节拍本身也是"合成流"特征。
-            if FRAME_JITTER > 0:
+            if FRAME_JITTER > 0 and not (LIVE_CLEAN and kind in ("rtsp", "jpeg")):
                 period *= 1.0 + random.uniform(-FRAME_JITTER, FRAME_JITTER)
             dt = period - (time.time() - t0)
             if dt > 0:
@@ -858,6 +864,7 @@ class NodeRouter:
                 "written": self.written,
                 "errors": self.errors,
                 "since": self.since,
+                "live_clean": bool(LIVE_CLEAN and self.kind in ("rtsp", "jpeg")),
                 "source_frames": (self.decoder or self.reader).frames
                                  if (self.decoder or self.reader) else 0,
                 "source_restarts": (self.decoder or self.reader).restarts

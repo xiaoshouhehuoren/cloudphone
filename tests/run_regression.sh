@@ -44,6 +44,9 @@ python3 verify_texture.py || FAIL=1
 say "rotated injection must not inherit the legacy ystretch compensation"
 python3 verify_orient_default.py || FAIL=1
 
+say "live phone injection is clean (no synthetic grain/AE/fps resampling)"
+python3 verify_live_clean.py /root/g98-camd.py || FAIL=1
+
 say "camd holds last frame when the rtsp source is silent"
 python3 verify_hold.py || FAIL=1
 
