@@ -26,6 +26,9 @@ python3 verify_mobile_fps.py || FAIL=1
 say "mobile /cam sensor sync and protocol compatibility"
 python3 verify_cam_sensor_page.py || FAIL=1
 
+say "per-lens sources stay independent and restore on stop"
+python3 verify_cam_source_restore.py wx1 || FAIL=1
+
 say "WeChat face video capture watcher and forensic analyzer selftest"
 python3 facecap_selftest.py || FAIL=1
 

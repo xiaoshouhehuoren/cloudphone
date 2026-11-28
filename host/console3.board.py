@@ -3969,7 +3969,7 @@ function camUpload(file,kind){var el=document.getElementById(kind==='image'?'img
 function camInjectFile(file,kind){if(!file)return;if(CAM.busy){toast('上一个注入还在进行中');return;}CAM.busy=true;var el=document.getElementById(kind==='image'?'imgstat':'vidstat');camStatus(el,file.name+' · 准备上传…');camUpload(file,kind).then(function(j){camStatus(el,'已上传，正在切源…');return post('/api/cam/start',{name:DEV,node:camNode(),path:j.path,kind:kind});}).then(function(j){if(j&&(j.ok||j.queued)){camStatus(el,'已注入 '+(kind==='image'?'图片':'视频')+'，云手机相机已切源',true);toast('已切换注入源');}else{camStatus(el,'注入失败：'+((j&&j.error)||'未知错误'),false);}}).catch(function(e){camStatus(el,'失败：'+(e&&e.message?e.message:e),false);}).then(function(){CAM.busy=false;setTimeout(cfgPoll,600);});}
 document.querySelectorAll('.camtab button').forEach(function(b){b.addEventListener('click',function(){camSheetTab(b.getAttribute('data-tab'))});});
 document.querySelectorAll('.seg [data-cnode]').forEach(function(b){b.addEventListener('click',function(){CAM.node=b.getAttribute('data-cnode');document.querySelectorAll('.seg [data-cnode]').forEach(function(x){x.classList.toggle('on',x===b)});var live=document.getElementById('camframe').classList.contains('show');if(live){try{document.getElementById('camframe').contentWindow.postMessage({cmd:'facing',facing:(CAM.node==='front'?'user':'environment')},'*');}catch(e){}}else{post('/api/cam/lens',{name:DEV,lens:CAM.node,launch:false}).catch(function(){});}toast((CAM.node==='front'?'前置':'后置')+'摄像头');toast((CAM.node==='front'?'前置':'后置')+'摄像头 · '+camNode());});});
-document.getElementById('camidle').addEventListener('click',function(){post('/api/cam/stop',{name:DEV}).then(function(){toast('已恢复空闲画面');camStatus(document.getElementById('imgstat'),'已恢复空闲');setTimeout(cfgPoll,600);});});
+document.getElementById('camidle').addEventListener('click',function(){post('/api/cam/stop',{name:DEV,restore:false}).then(function(){toast('已恢复空闲画面');camStatus(document.getElementById('imgstat'),'已恢复空闲');setTimeout(cfgPoll,600);});});
 document.getElementById('camimg').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'image');});
 document.getElementById('camvideo').addEventListener('change',function(e){camInjectFile(e.target.files&&e.target.files[0],'video');});
 document.getElementById('cambtn').addEventListener('click',function(){openSheet('camsheet');camSheetTab('live');});
@@ -4691,6 +4691,71 @@ def cam_camd_frame(node, data, timeout=2.0):
         return False
 
 
+# 页面 JPEG 推流（/cam、外网 /camctl）是临时源：切进去之前记下该节点原来的源
+# （通常是 rtsp 注入），停流或页面崩溃后自动还原，否则节点会一直停在 webcam。
+CAM_SRC_SAVED = {}
+CAM_SRC_STALL = float(os.environ.get("G98_CAM_SRC_STALL", "45"))
+
+
+def cam_src_snapshot(node):
+    """记下节点当前真实源，供 cam_src_restore 还原。jpeg/idle 不记。"""
+    snap = cam_camd_node_state(node) or {}
+    kind = snap.get("kind")
+    arg = snap.get("arg")
+    if kind not in ("rtsp", "image", "video") or not arg:
+        return None
+    geom = snap.get("geometry") or {}
+    return {"kind": {"rtsp": "stream", "image": "image", "video": "video"}[kind],
+            "arg": arg,
+            "fit": geom.get("fit"), "rotate": geom.get("rotate"),
+            "mirror": geom.get("mirror"), "ystretch": geom.get("ystretch"),
+            "frames": snap.get("source_frames"), "at": time.time()}
+
+
+def cam_src_restore(node, reason=""):
+    """把节点还原成 cam_src_snapshot 记下的源；没有记录时返回 None。"""
+    rec = CAM_SRC_SAVED.get(node)
+    if not rec:
+        return None
+    geom = {k: rec.get(k) for k in ("fit", "rotate", "mirror", "ystretch")}
+    try:
+        cam_camd_set(node, cam_camd_kind(rec["kind"]), rec["arg"], geom=geom)
+    except Exception as exc:  # noqa: BLE001
+        _alog("cam src restore %s failed: %s" % (node, str(exc)[:120]))
+        return None
+    CAM_SRC_SAVED.pop(node, None)
+    _alog("cam src restore %s -> %s %s (%s)"
+          % (node, rec["kind"], str(rec["arg"])[:60], reason))
+    return rec
+
+
+def cam_src_janitor():
+    """页面没发 stop 就断了（关标签页崩溃、断网）时，按“不再有新帧”超时还原。"""
+    while True:
+        time.sleep(10)
+        if not CAM_SRC_SAVED:
+            continue
+        try:
+            nodes = cam_camd_nodes()
+        except Exception:  # noqa: BLE001
+            continue
+        now = time.time()
+        for node, rec in list(CAM_SRC_SAVED.items()):
+            snap = nodes.get(node) or {}
+            if snap.get("kind") != "jpeg":
+                CAM_SRC_SAVED.pop(node, None)
+                continue
+            frames = snap.get("source_frames")
+            if frames is None:
+                continue
+            if frames != rec.get("frames"):
+                rec["frames"] = frames
+                rec["at"] = now
+                continue
+            if now - rec.get("at", now) > CAM_SRC_STALL:
+                cam_src_restore(node, "no frames for %.0fs" % (now - rec.get("at", now)))
+
+
 def _cam_producer_pid(node):
     rc, out, _ = sh(["ps", "-eo", "pid,args"], timeout=10)
     for line in (out or "").splitlines():
@@ -4873,6 +4938,12 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
     """
     cam_idle("stop")
     geom = dict(geom or {})
+    if kind == "webcam":
+        # 必须在改源之前记：页面推流是临时源，停流后要还原回原来的 rtsp/文件源。
+        _rec = cam_src_snapshot(node)
+        if _rec:
+            CAM_SRC_SAVED[node] = _rec
+            _alog("cam src save %s %s %s" % (node, _rec["kind"], str(_rec["arg"])[:60]))
     if kind in ("image", "video", "stream"):
         ost = cam_orient_state(name)
         if ost.get("auto") and geom.get("rotate") is None:
@@ -4884,7 +4955,11 @@ def cam_do_start_camd(name, node, path, kind, t0, geom=None):
     cam_keepf(node, 1)
     # 默认把同一个源也下发给另一路（后置 <-> 前置）。相机 App 记住上次摄像头时，
     # 只注入一路会出现“切过去全黑/看到旧画面”，像是前置拿到了后置的数据。
-    both = True if not geom or geom.get("both") is None else bool(geom.get("both"))
+    # 页面 JPEG 推流只作用于目标镜头（另一路保留自己的源），文件/RTSP 注入仍然两路同源。
+    if not geom or geom.get("both") is None:
+        both = kind != "webcam"
+    else:
+        both = bool(geom.get("both"))
     peer = cam_pair_node(name, node)
     if both and peer and kind in ("image", "video", "stream"):
         try:
@@ -5047,7 +5122,7 @@ def cam_do_start(name, node, path, kind, geom=None):
             name, node, kind, os.path.basename(path), info.get("pid"), resumed, st.get("steps")))
 
 
-def cam_do_stop(name, node=None):
+def cam_do_stop(name, node=None, restore=True):
     with CAM_SEQ:
         t0 = time.time()
         if cam_camd_health():
@@ -5056,11 +5131,18 @@ def cam_do_stop(name, node=None):
             # camd 自己持有所有节点，直接问它要列表即可；cam_open_nodes 要在容器里
             # 扫一遍所有 /proc/*/fd（docker exec 每次 4-6 秒），camd 模式下纯属浪费。
             targets = [node] if node else list(cam_nodes_for(name))
-            for extra in cam_camd_nodes().keys():
-                if extra in targets or extra not in cam_nodes_for(name):
-                    continue
-                targets.append(extra)
+            # 指定 node 时只停这一路（前后摄各一路独立源，页面停前摄不能把后摄一起 idle）；
+            # 只有不指定 node 的全停才把实例内其它节点一并收回。
+            if not node:
+                for extra in cam_camd_nodes().keys():
+                    if extra in targets or extra not in cam_nodes_for(name):
+                        continue
+                    targets.append(extra)
             for target in targets:
+                # 页面推流（jpeg）停掉时还原成切进来之前那一路源，而不是一律 idle。
+                if restore and target in CAM_SRC_SAVED:
+                    if cam_src_restore(target, "stop"):
+                        continue
                 try:
                     cam_camd_set(target, "idle", timeout=4.0)
                 except Exception as exc:  # noqa: BLE001
@@ -6463,7 +6545,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "bad node"}, 400)
             # 空表示停本实例全部节点，避免漏掉另一路的 writer/ffmpeg
             node = cam_norm_node(name, requested) if requested else ""
-            if not cam_submit(name, "stop", lambda: cam_do_stop(name, node)):
+            restore = True if body.get("restore") is None else bool(body.get("restore"))
+            if not cam_submit(name, "stop", lambda: cam_do_stop(name, node, restore=restore)):
                 return self._json({"ok": True, "queued": False, "state": cam_state(name)})
             return self._json({"ok": True, "queued": True, "node": node or "all",
                                "state": cam_state(name)})
@@ -6566,6 +6649,10 @@ def main():
     cleanup_orphans()
     threading.Thread(target=refresh_loop, daemon=True).start()
     threading.Thread(target=rtc_janitor, daemon=True).start()
+    try:
+        threading.Thread(target=cam_src_janitor, daemon=True).start()
+    except Exception as _exc:  # noqa: BLE001
+        _alog("cam src janitor start failed: %s" % str(_exc)[:120])
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     tls_ok = False
     try:
