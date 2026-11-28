@@ -3019,6 +3019,23 @@ var canvas=document.createElement('canvas'); canvas.width=480; canvas.height=360
 var ctx=canvas.getContext('2d',{willReadFrequently:true});
 var stream=null, ws=null, pc=null, videoSender=null, timer=null, whipTimer=null, whipStats=null, camStarted=false, frames=0, bytes=0, busy=false, facing=(q.get('facing')==='user'?'user':'environment'), closedByUs=false;
 var reconnects=0, reconnectTimer=null, discTimer=null;
+// 手机浏览器可能默认采集 90/120fps；采集和 WebRTC 发送必须同时限到 30fps。
+var CAPTURE_FPS=30, sendFps=0, sendKbps=0, lastFrames=0, lastBytes=0, lastStatsAt=0;
+function cameraConstraints(){ return {audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:CAPTURE_FPS,max:CAPTURE_FPS}}}; }
+function limitCapture(s){
+  var t=s&&s.getVideoTracks&&s.getVideoTracks()[0]; if(!t) return Promise.resolve();
+  try{ t.contentHint='motion'; }catch(e){}
+  if(!t.applyConstraints) return Promise.resolve();
+  return t.applyConstraints({frameRate:{ideal:CAPTURE_FPS,max:CAPTURE_FPS}}).catch(function(){ });
+}
+function limitSender(sender){
+  if(!sender||!sender.getParameters||!sender.setParameters) return;
+  try{
+    var p=sender.getParameters(); if(!p.encodings||!p.encodings.length) p.encodings=[{}];
+    p.encodings[0].maxFramerate=CAPTURE_FPS; p.encodings[0].maxBitrate=2500000;
+    sender.setParameters(p).catch(function(){});
+  }catch(e){}
+}
 var startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop'), flipBtn=document.getElementById('flip');
 document.getElementById('dev').textContent=dev;
 document.getElementById('node').value=node;
@@ -3175,7 +3192,7 @@ function whipStart(){
         fail(new Error('ICE '+p.connectionState));
       }
     };
-    stream.getVideoTracks().forEach(function(t){ videoSender=p.addTrack(t,stream); });
+    stream.getVideoTracks().forEach(function(t){ videoSender=p.addTrack(t,stream); limitSender(videoSender); });
     p.createOffer()
      .then(function(o){ return p.setLocalDescription(o); })
      .then(function(){
@@ -3233,6 +3250,7 @@ function scheduleReconnect(){
 }
 function startWhipStats(p){
   if(whipStats){ clearInterval(whipStats); whipStats=null; }
+  lastFrames=frames; lastBytes=bytes; lastStatsAt=0; sendFps=0; sendKbps=0;
   whipStats=setInterval(function(){
     if(!pc||pc!==p) return;
     p.getStats().then(function(rs){
@@ -3240,8 +3258,11 @@ function startWhipStats(p){
         if(r.type==='outbound-rtp'&&r.kind==='video'){
           if(typeof r.framesEncoded==='number') frames=r.framesEncoded;
           if(typeof r.bytesSent==='number') bytes=r.bytesSent;
-          document.getElementById('frames').textContent=frames+' 帧';
-          document.getElementById('bytes').textContent=(bytes/1048576).toFixed(1)+' MB';
+          var now=Date.now();
+          if(lastStatsAt){ var dt=(now-lastStatsAt)/1000; if(dt>0){ sendFps=(typeof r.framesPerSecond==='number'?Math.round(r.framesPerSecond):Math.max(0,Math.round((frames-lastFrames)/dt))); sendKbps=Math.max(0,Math.round((bytes-lastBytes)*8/dt/1000)); } }
+          lastFrames=frames; lastBytes=bytes; lastStatsAt=now;
+          document.getElementById('frames').textContent=frames+' 帧 · '+sendFps+' fps';
+          document.getElementById('bytes').textContent=(bytes/1048576).toFixed(1)+' MB · '+sendKbps+' kbps';
         }
       });
     }).catch(function(){});
@@ -3294,8 +3315,8 @@ function openCam(){
     log('浏览器不支持摄像头 API，请用 HTTPS 打开本页。'); state('需要 HTTPS',false); return;
   }
   stopAll(true); ph.style.display='flex'; ph.textContent='正在打开摄像头…'; state('请求权限…',false);
-  navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720}}})
-   .then(function(s){ stream=s; pv.srcObject=s; return pv.play().catch(function(){}); })
+  navigator.mediaDevices.getUserMedia(cameraConstraints())
+   .then(function(s){ stream=s; pv.srcObject=s; return limitCapture(s).then(function(){ return pv.play().catch(function(){}); }); })
    .then(function(){ beginStream(); })
    .catch(function(e){
       log('摄像头打开失败：'+(e&&e.message?e.message:e)); state('打开失败',false);
@@ -3311,13 +3332,13 @@ function switchFacing(nf){
   log('切换摄像头：'+nc);
   // 热切换：同一个 peer connection 上 replaceTrack，不重开推流、不重启云手机相机 App。
   if(!videoSender||!pc||pc.connectionState!=='connected'||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ openCam(); return; }
-  navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720}}})
+  navigator.mediaDevices.getUserMedia(cameraConstraints())
    .then(function(s){
      var t=(s.getVideoTracks()||[])[0];
      if(!t) throw new Error('没有视频轨');
      return videoSender.replaceTrack(t).then(function(){
        if(stream&&stream!==s){ stream.getVideoTracks().forEach(function(o){ if(o!==t){ try{o.stop();}catch(e){} } }); }
-       stream=s; try{ pv.srcObject=s; pv.play().catch(function(){}); }catch(e){}
+       stream=s; try{ pv.srcObject=s; pv.play().catch(function(){}); }catch(e){} limitCapture(s); limitSender(videoSender);
        log('已热切换到'+nc+'摄像头，推流未中断');
      });
    })

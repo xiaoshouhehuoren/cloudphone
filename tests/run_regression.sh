@@ -20,6 +20,9 @@ say "dashboard material library API"
 /usr/bin/curl -sf -H 'Cookie: g98k=g98panel' http://127.0.0.1:8099/api/cam/files >/dev/null \
     || { echo "files API FAILED"; FAIL=1; }
 
+say "mobile web publisher caps capture and WHIP sending at 30 fps"
+python3 verify_mobile_fps.py || FAIL=1
+
 say "camera providers (legacy running, external crash loop disabled)"
 python3 verify_camera_providers.py || FAIL=1
 
