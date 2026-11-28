@@ -1,0 +1,65 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>G98 云手机</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#05080c;color:#eef5fc;font:14px/1.4 system-ui,sans-serif;overflow:hidden}
+header{display:flex;gap:6px;align-items:center;padding:8px 10px;background:#0e1720;position:sticky;top:0;z-index:5}
+header b{flex:1;font-weight:600}
+button{background:#182838;color:#dbe8f6;border:1px solid #26384a;border-radius:8px;padding:7px 9px;font-size:13px}
+button.on{background:rgba(91,140,255,.18);border-color:#5b8cff;color:#fff}
+#wrap{padding:0 4px;overflow:auto;height:calc(100% - 96px)}
+#scr{width:100%;display:block;background:#000;border-radius:6px;touch-action:none}
+#log{padding:6px 10px;color:#8ea2b6;font-size:12px;height:34px;overflow:hidden}
+#cam{position:fixed;inset:0;background:#05080c;display:none;flex-direction:column;z-index:9}
+#cam.show{display:flex}
+#cam iframe{flex:1;border:0;width:100%;background:#000}
+#cam .bar{display:flex;gap:6px;padding:8px;background:#0e1720}
+</style></head><body>
+<header><b>云手机 <span id="dev"></span></b>
+<button id="btnCam">相机</button><button id="btnHome">桌面</button><button id="btnBack">返回</button></header>
+<div id="wrap"><img id="scr" alt="screen"></div>
+<div id="log">连接中…</div>
+<div id="cam"><div class="bar"><button data-lens="back" class="on">后置</button><button data-lens="front">前置</button><button id="btnCamClose">关闭相机</button></div><iframe id="camFrame"></iframe></div>
+<script>
+(function(){
+var DEV='@@DEV@@', NODE='@@NODE@@', FACING='@@FACING@@';
+var scr=document.getElementById('scr'), log=document.getElementById('log');
+document.getElementById('dev').textContent=DEV;
+function say(m){log.textContent=m}
+function post(u,o){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o||{})}).then(function(r){return r.json().catch(function(){return {}})}).then(function(j){if(j&&j.error)say('失败: '+j.error);return j}).catch(function(){say('网络错误');return {ok:false}})}
+function loadScreen(){scr.src='/stream/'+encodeURIComponent(DEV)+'?t='+Date.now();say('屏幕已连接 · 点击=点按 拖动=滑动')}
+scr.onerror=function(){say('画面加载失败，3 秒后重试');setTimeout(loadScreen,3000)};
+function fx(e){var r=scr.getBoundingClientRect();return Math.min(1,Math.max(0,(e.clientX-r.left)/r.width))}
+function fy(e){var r=scr.getBoundingClientRect();return Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))}
+var down=null;
+scr.addEventListener('pointerdown',function(e){down={x:e.clientX,y:e.clientY,t:Date.now(),fx:fx(e),fy:fy(e)}});
+scr.addEventListener('pointerup',function(e){
+  if(!down)return;var d=down;down=null;
+  var dx=e.clientX-d.x, dy=e.clientY-d.y;
+  if(Math.abs(dx)<12&&Math.abs(dy)<12&&Date.now()-d.t<600){
+    post('/api/tap',{name:DEV,fx:fx(e),fy:fy(e)}).then(function(){setTimeout(loadScreen,320)});
+  }else{
+    post('/api/swipe',{name:DEV,fx1:d.fx,fy1:d.fy,fx2:fx(e),fy2:fy(e),dur:Math.max(120,Math.min(900,Date.now()-d.t))}).then(function(){setTimeout(loadScreen,380)});
+  }
+});
+document.getElementById('btnBack').onclick=function(){post('/api/key',{name:DEV,code:4}).then(function(){setTimeout(loadScreen,300)})};
+document.getElementById('btnHome').onclick=function(){post('/api/key',{name:DEV,code:3}).then(function(){setTimeout(loadScreen,300)})};
+var cam=document.getElementById('cam'), frame=document.getElementById('camFrame');
+function backNode(){var n=parseInt(NODE.replace(/[^0-9]/g,''),10)||20;return '/dev/video'+(n%2?n-1:n)}
+function nodeFor(lens){var b=parseInt(backNode().replace(/[^0-9]/g,''),10);return '/dev/video'+(lens==='front'?b+1:b)}
+function openCam(){frame.src='/cam?device='+encodeURIComponent(DEV)+'&node='+encodeURIComponent(NODE)+'&facing='+FACING+'&jpeg=1';cam.classList.add('show')}
+document.getElementById('btnCam').onclick=openCam;
+document.getElementById('btnCamClose').onclick=function(){cam.classList.remove('show');frame.src='about:blank';setTimeout(loadScreen,400)};
+var lensBtns=document.querySelectorAll('#cam .bar [data-lens]');
+for(var i=0;i<lensBtns.length;i++){(function(b){b.onclick=function(){
+  var lens=b.getAttribute('data-lens');
+  for(var j=0;j<lensBtns.length;j++){lensBtns[j].classList.toggle('on',lensBtns[j]===b)}
+  post('/api/cam/lens',{name:DEV,lens:lens}).then(function(){
+    NODE=nodeFor(lens);FACING=(lens==='front'?'user':'environment');
+    frame.src='/cam?device='+encodeURIComponent(DEV)+'&node='+encodeURIComponent(NODE)+'&facing='+FACING+'&jpeg=1';
+  });
+}})(lensBtns[i])}
+loadScreen();
+})();
+</script></body></html>

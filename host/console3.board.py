@@ -1664,7 +1664,7 @@ body.zoomwrap .scr img{max-width:none;width:100%;height:100%}
     <div class="mini">手机和板子连同一网络。扫码后允许摄像头权限，手机画面会注入到云手机的相机节点。</div>
     <img id="qrimg" alt="手机摄像头二维码">
     <div id="qrlog">生成中…</div>
-    <div class="camrow"><button class="ghost" id="qrclose">关闭</button></div>
+    <div class="camrow"><button class="ghost" id="qrpublic">外网一次性链接</button><button class="ghost" id="qrclose">关闭</button></div>
   </div>
 </div>
 <div id="livewrap" class="hide">
@@ -2545,23 +2545,32 @@ function openCam(){ camFillNodes(); setTab('cam'); setTimeout(camLibLoad, 150); 
 function closeCam(){ setTab('info'); }
 el('camopen').addEventListener('click', openCam);
 // desktop camera controls now live in the inspector "相机" tab
-function openQR(){
+function openQR(pub){
   if(!S.sel) return toast('先选一台实例');
   var node = el('camnode').value || '/dev/video10';
+  // 节点号奇偶对应镜头：前置是 base+1（见 camNodeFor），后置是 base。
+  var facing = (parseInt(String(node).replace(/[^0-9]/g, ''), 10) % 2) ? 'user' : 'environment';
   el('qrmodal').classList.remove('hide');
   el('qrimg').removeAttribute('src');
-  el('qrlog').textContent = '正在生成二维码…';
-  fetch('/api/cam/qr?name=' + encodeURIComponent(S.sel) + '&node=' + encodeURIComponent(node))
+  el('qrlog').textContent = pub ? '正在向外网网关申领一次性链接…' : '正在生成二维码…';
+  fetch('/api/cam/qr?name=' + encodeURIComponent(S.sel) + '&node=' + encodeURIComponent(node)
+        + '&facing=' + encodeURIComponent(facing) + (pub ? '&public=1' : ''))
     .then(function(r){ return r.json(); })
     .then(function(j){
       if(!j || j.error){ el('qrlog').textContent = (j && j.error) || '生成失败'; return; }
       el('qrimg').src = j.png;
-      el('qrlog').textContent = 'https://' + j.host + ':' + j.port + '/m · 手机全功能操控';
+      if(j.public){
+        el('qrlog').textContent = '外网一次性 · ' + j.url + ' · ' +
+          Math.round((j.expires_in || 300) / 60) + ' 分钟内首次打开有效，打开后可继续用 30 分钟；再打开需重新生成';
+      } else {
+        el('qrlog').textContent = 'https://' + j.host + ':' + j.port + '/m · 手机全功能操控';
+      }
     })
     .catch(function(e){ el('qrlog').textContent = '请求失败：' + e; });
 }
 function closeQR(){ el('qrmodal').classList.add('hide'); }
 el('camqrbtn').addEventListener('click', function(){ closeCam(); openQR(); });
+el('qrpublic').addEventListener('click', function(){ openQR(true); });
 el('qrclose').addEventListener('click', closeQR);
 el('qrmodal').addEventListener('click', function(e){ if(e.target === this) closeQR(); });
 document.addEventListener('keydown', function(e){
@@ -4851,6 +4860,29 @@ def cam_qr_png(text):
     return None
 
 
+# 外网一次性入口：由 OTA 网关（prod /opt/workphone-ota）签发 token，链接 5 分钟内首次
+# 打开有效且只能用一次；网关反过来代理板子 8099（/cam 页面、/stream MJPEG、点按/滑动）。
+OTA_PUBLIC = os.environ.get("G98_OTA_PUBLIC", "https://sales-ck.kuaihuoyun.com").rstrip("/")
+OTA_MINT_PATH = "/api/remote/new"
+
+
+def ota_public_mint(device, node, facing):
+    body = json.dumps({"device": device, "node": node, "facing": facing or "user"}).encode()
+    req = urllib.request.Request(OTA_PUBLIC + OTA_MINT_PATH, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-G98-Token", api_token())
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+    except urllib.error.HTTPError as exc:
+        return {"error": "网关拒绝 HTTP %s" % exc.code}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "网关不可达：%s" % exc}
+    if not data.get("url"):
+        return {"error": "网关未返回链接"}
+    return data
+
+
 CAM_STATE = {}
 CAM_STATE_LOCK = threading.Lock()
 CAM_TASKS = {}
@@ -5821,6 +5853,19 @@ class Handler(BaseHTTPRequestHandler):
             host = (self.headers.get("Host") or "").split(":")[0].strip()
             if not host or host in ("127.0.0.1", "localhost"):
                 host = TLS_IP
+            public = (qs.get("public") or ["0"])[0].lower() in ("1", "true", "yes")
+            if public:
+                facing = (qs.get("facing") or ["user"])[0]
+                minted = ota_public_mint(name, node, facing)
+                if minted.get("error"):
+                    return self._json({"error": minted["error"]}, 502)
+                png = cam_qr_png(minted["url"])
+                if not png:
+                    return self._json({"error": "qrencode 不可用"}, 500)
+                return self._json({"ok": True, "public": True, "url": minted["url"],
+                                   "expires_in": minted.get("expires_in", 300),
+                                   "node": node, "facing": facing,
+                                   "png": "data:image/png;base64," + base64.b64encode(png).decode()})
             target = "https://%s:%d/m?%s" % (
                 host, TLS_PORT,
                 urlencode({"k": api_token(), "device": name, "node": node}))
