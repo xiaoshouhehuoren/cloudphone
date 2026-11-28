@@ -107,6 +107,7 @@ def main():
             print("  frames=%d bytes=%d expected=%d -> %s" % (frames, nbytes, expected, "PASS" if ok else "FAIL"))
             if not ok:
                 fails += 1
+            time.sleep(1.5)
     finally:
         restore_sources(saved)
     print("RESULT %s" % ("PASS" if fails == 0 else "FAIL"))

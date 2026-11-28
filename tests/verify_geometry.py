@@ -8,7 +8,7 @@ Stages compared:
   4. camera app stream  (dumpsys: SurfaceTexture-WxH / ImageReader-WxH)
   5. on-screen picture  (screenshot: non-black rect, mapped back to buffer)
 
-Usage: verify_geometry.py <name> <node> <media> [fit] [ystretch]
+Usage: verify_geometry.py <name> <node> <media> [fit] [ystretch|auto] [rotate|auto]
 """
 import json
 import os
@@ -105,13 +105,26 @@ def peer_node(node):
     return "/dev/video%d" % (n + 1 if (n - 20) % 2 == 0 else n - 1)
 
 
+def sensor_orientation(name):
+    out = sh('%s exec %s dumpsys media.camera 2>/dev/null' % (DOCKER, name))
+    m = re.search(r"android\.sensor\.orientation[^\n]*\n\s*\[\s*(\d+)\s*\]", out)
+    return int(m.group(1)) if m else 0
+
+
 def main():
     name, node, media = sys.argv[1], sys.argv[2], sys.argv[3]
     fit = sys.argv[4] if len(sys.argv) > 4 else "contain"
-    ystretch = float(sys.argv[5]) if len(sys.argv) > 5 else None
+    ys_arg = sys.argv[5] if len(sys.argv) > 5 else "auto"
+    rot_arg = sys.argv[6] if len(sys.argv) > 6 else "auto"
+    if rot_arg == "auto":
+        orient = sensor_orientation(name)
+        rotate = (0 - orient) % 360
+    else:
+        rotate = int(rot_arg) % 360
+    ystretch = None if ys_arg in ("auto", "", "none") else float(ys_arg)
     body = {"node": node, "kind": "video" if media.endswith((".mp4", ".webm", ".mkv"))
-            else "image", "path": media, "fit": fit}
-    if ystretch:
+            else "image", "path": media, "fit": fit, "rotate": rotate}
+    if ystretch is not None:
         body["ystretch"] = ystretch
     sh("curl -s -X POST %s/set -H 'Content-Type: application/json' -d '%s'"
        % (CAMD, json.dumps(body)))
@@ -178,13 +191,14 @@ def main():
         check("on-screen fills frame", box[2] >= full_w * 0.96 and box[3] >= full_h * 0.94,
               "screen=%s preview=%dx%d" % (box, full_w, full_h))
     elif box:
-        # the camera app maps the node buffer onto the preview area with
-        # independent x/y factors (it does not preserve the buffer aspect).
-        # The user-visible proportion is therefore the plain screen aspect of
-        # the picture, which must equal the source aspect.
+        # When pre-rotated (90/270) to match sensor.orientation=90, the camera
+        # app rotates the landscape node buffer back onto the portrait preview,
+        # so the on-screen picture aspect equals the upright source aspect
+        # (src_w / src_h) rather than the rotated buffer DAR.
         obs_dar = box[2] / float(box[3])
-        check("on-screen aspect", abs(obs_dar - want_dar) <= max(0.02, want_dar * 0.03),
-              "observed=%.3f source=%.3f screen=%s" % (obs_dar, want_dar, box))
+        screen_want = round(geo["src_w"] / float(geo["src_h"]), 3) if rotate in (90, 270) else want_dar
+        check("on-screen aspect", abs(obs_dar - screen_want) <= max(0.02, screen_want * 0.03),
+              "observed=%.3f source=%.3f screen=%s rotate=%d" % (obs_dar, screen_want, box, rotate))
     else:
         check("on-screen rect", False, "no picture found in screenshot")
     print("RESULT", "PASS" if ok else "FAIL")
