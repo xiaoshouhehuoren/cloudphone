@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live phone streams must not get synthetic grain/AE/fps resampling."""
+"""Live streams skip grain/AE/fps resampling and never synthesize CFR frames."""
 import importlib.util
 import sys
 
@@ -12,6 +12,12 @@ geo = {"fit": "cover", "rotate": 270, "ystretch": 1.0, "mirror": False}
 cmd = m.source_cmd("rtsp", "rtsp://127.0.0.1:8554/cam-wx1", geo)
 vf = cmd[cmd.index("-vf") + 1]
 print("rtsp -vf:", vf)
+if "-fps_mode" not in cmd or cmd[cmd.index("-fps_mode") + 1] != "passthrough":
+    print("[FAIL] live RTSP must not synthesize CFR frames")
+    fails += 1
+if "-nostdin" not in cmd:
+    print("[FAIL] live ffmpeg must not consume the caller script stdin")
+    fails += 1
 for forbidden in ("noise=", "eq=brightness", "fps="):
     if m.LIVE_CLEAN and forbidden in vf:
         print("[FAIL] live filter contains", forbidden)

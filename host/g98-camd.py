@@ -399,12 +399,16 @@ def source_cmd(kind, arg, geo, fps=None):
         # Low-latency pull: the phone encoder and mediamtx already add delay, so
         # do not let ffmpeg's demuxer/decoder add its own analysis + reorder
         # buffering on top (that alone was worth ~1s of lag behind the phone).
-        return [FFMPEG, "-hide_banner", "-loglevel", "error",
+        return [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-fflags", "nobuffer", "-flags", "low_delay",
                 "-analyzeduration", "0", "-probesize", "32",
                 "-max_delay", "0", "-reorder_queue_size", "0",
                 "-rtsp_transport", "tcp",
                 "-i", arg, "-vf", build_vf(geo, fps or FPS, live=True),
+                # With probesize=32 VP8 often reports tbr=90k. rawvideo CFR then
+                # duplicates every phone frame thousands of times until the pipe
+                # applies backpressure (~145 fps): preserve decoded frames/PTS.
+                "-fps_mode", "passthrough",
                 "-flush_packets", "1",
                 "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     raise ValueError("bad kind " + kind)
